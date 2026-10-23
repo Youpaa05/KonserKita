@@ -1,0 +1,25 @@
+{
+    "name": "konserkita-backend",
+    "version": "1.0.0",
+    "main": "index.js",
+    "directories": {
+        "test": "tests"
+    },
+    "scripts": {
+        "start": "node src/server.js",
+        "dev": "node --watch src/server.js",
+        "test": "node --test tests/booking-validation.test.js tests/booking-transaction.test.js"
+    },
+    "keywords": [],
+    "author": "",
+    "license": "ISC",
+    "description": "",
+    "dependencies": {
+        "cors": "^2.8.6",
+        "dotenv": "^18.0.9",
+        "express": "^5.3.0",
+        "pg": "^8.23.1"
+    },
+    "private": true,
+    "type": "module"
+}

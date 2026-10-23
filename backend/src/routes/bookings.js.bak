@@ -1,0 +1,74 @@
+
+import express from "express";
+import cors from "cors";
+import { checkDatabaseConnection } from "./config/database.js";
+import concertRouter from "./routes/concerts.js";
+import bookingRouter from "./routes/bookings.js";
+import { pool } from "../config/database.js";
+
+const app = express();
+
+app.disable("x-powered-by");
+
+app.use(
+  cors({
+    origin: process.env.FRONTEND_URL || "http://localhost:5173",
+  }),
+);
+
+app.use(express.json({ limit: "100kb" }));
+
+app.get("/api/health", (_req, res) => {
+  res.status(200).json({
+    success: true,
+    message: "KonserKita API berjalan.",
+    service: "konserkita-backend",
+  });
+});
+
+app.get("/api/health/db", async (_req, res) => {
+  const result = await checkDatabaseConnection();
+
+  if (!result.connected) {
+    return res.status(503).json({
+      success: false,
+      message: "Database belum dapat dihubungi.",
+      database: "unavailable",
+    });
+  }
+
+  return res.status(200).json({
+    success: true,
+    message: "Koneksi database berhasil.",
+    database: "connected",
+  });
+});
+
+app.use("/api/concerts", concertRouter);
+app.use("/api/bookings", bookingRouter);
+
+// Penanganan error JSON dan error server yang tidak ditangani route.
+app.use((err, _req, res, _next) => {
+  if (err instanceof SyntaxError && "body" in err) {
+    return res.status(400).json({
+      success: false,
+      message: "Format JSON tidak valid.",
+    });
+  }
+
+  console.error("API error:", err.message);
+
+  return res.status(500).json({
+    success: false,
+    message: "Terjadi kesalahan pada server.",
+  });
+});
+
+app.use((_req, res) => {
+  res.status(404).json({
+    success: false,
+    message: "Endpoint tidak ditemukan.",
+  });
+});
+
+export default app;
