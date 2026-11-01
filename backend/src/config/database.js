@@ -1,5 +1,11 @@
-﻿import "dotenv/config";
+﻿
+import dotenv from "dotenv";
+import path from "node:path";
 import pg from "pg";
+
+dotenv.config({
+  path: path.resolve(process.cwd(), "backend", ".env"),
+});
 
 const { Pool } = pg;
 
@@ -15,14 +21,16 @@ const missingVariables = requiredVariables.filter(
   (name) => !process.env[name]?.trim(),
 );
 
-const databaseConfigured = databaseUrl || missingVariables.length === 0;
+const databaseConfigured =
+  Boolean(databaseUrl) || missingVariables.length === 0;
 
 const pool = new Pool(
   databaseUrl
     ? {
         connectionString: databaseUrl,
+        ssl: { rejectUnauthorized: false },
         max: 10,
-        connectionTimeoutMillis: 3000,
+        connectionTimeoutMillis: 10000,
         idleTimeoutMillis: 30000,
       }
     : {
@@ -32,7 +40,7 @@ const pool = new Pool(
         user: process.env.DB_USER,
         password: process.env.DB_PASSWORD,
         max: 10,
-        connectionTimeoutMillis: 3000,
+        connectionTimeoutMillis: 10000,
         idleTimeoutMillis: 30000,
       },
 );
@@ -41,6 +49,11 @@ export { pool };
 
 export async function checkDatabaseConnection() {
   if (!databaseConfigured) {
+    console.error(
+      "Database configuration missing:",
+      missingVariables,
+    );
+
     return {
       connected: false,
       reason: "configuration_missing",
@@ -54,7 +67,10 @@ export async function checkDatabaseConnection() {
       connected: true,
     };
   } catch (error) {
-    console.error("Database connection failed:", error.message);
+    console.error(
+      "Database connection failed:",
+      error.message,
+    );
 
     return {
       connected: false,
