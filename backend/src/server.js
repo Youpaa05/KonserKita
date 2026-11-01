@@ -1,12 +1,11 @@
-
-import "dotenv/config";
+﻿import "dotenv/config";
 import app from "./app.js";
 import { pool } from "./config/database.js";
 
 const PORT = Number(process.env.PORT) || 3000;
 
-const server = app.listen(PORT, () => {
-  console.log(`KonserKita API berjalan di http://localhost:${PORT}`);
+const server = app.listen(PORT, "0.0.0.0", () => {
+  console.log(`KonserKita API berjalan pada port ${PORT}`);
 });
 
 let shuttingDown = false;
