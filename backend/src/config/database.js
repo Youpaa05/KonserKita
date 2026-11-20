@@ -1,17 +1,17 @@
 import dotenv from "dotenv";
 import { isIP } from "node:net";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import pg from "pg";
 import pgConnectionString from "pg-connection-string";
 
-const currentDirectory = path.dirname(fileURLToPath(import.meta.url));
-const backendDirectory = path.resolve(currentDirectory, "../..");
+const workingDirectory = path.resolve(process.cwd());
+const backendDirectory =
+  path.basename(workingDirectory).toLowerCase() === "backend"
+    ? workingDirectory
+    : path.resolve(workingDirectory, "backend");
 const envPath = path.join(backendDirectory, ".env");
 
-dotenv.config({
-  path: envPath,
-});
+dotenv.config({ path: envPath });
 
 const { Pool } = pg;
 

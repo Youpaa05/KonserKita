@@ -104,7 +104,9 @@ test("profil hanya menerima nama dan email dan tidak mengembalikan hash", async 
 
 test("authenticated mutations reject untrusted or missing production Origin", async () => customerHarness(async (base, token) => {
   const originalEnvironment = process.env.NODE_ENV;
+  const originalFrontendUrl = process.env.FRONTEND_URL;
   process.env.NODE_ENV = "production";
+  process.env.FRONTEND_URL = "http://localhost:5173";
   try {
     const body = JSON.stringify({ name: "Nama Baru" });
     const headers = { ...authHeaders(token), "Content-Type": "application/json" };
@@ -131,6 +133,8 @@ test("authenticated mutations reject untrusted or missing production Origin", as
   } finally {
     if (originalEnvironment === undefined) delete process.env.NODE_ENV;
     else process.env.NODE_ENV = originalEnvironment;
+    if (originalFrontendUrl === undefined) delete process.env.FRONTEND_URL;
+    else process.env.FRONTEND_URL = originalFrontendUrl;
   }
 }));
 
