@@ -8,6 +8,14 @@ export default function Concerts() {
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState("");
   const [city, setCity] = useState("");
+  const [artist, setArtist] = useState("");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  const [sort, setSort] = useState("date");
+  const [availability, setAvailability] = useState("");
+  const [page, setPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
+  const [totalConcerts, setTotalConcerts] = useState(0);
   const [concerts, setConcerts] = useState([]);
   const [categories, setCategories] = useState([]);
   const [cities, setCities] = useState([]);
@@ -24,15 +32,17 @@ export default function Concerts() {
 
       try {
         const data = await getConcerts(
-          { query, category, city },
+          { query, category, city, artist, dateFrom, dateTo, availability, sort, page, limit: 12 },
           { signal: controller.signal },
         );
 
-        if (!Array.isArray(data)) {
+        if (!Array.isArray(data?.concerts) || !Number.isSafeInteger(data.totalPages)) {
           throw new Error("Format data konser dari server tidak valid.");
         }
 
-        setConcerts(data);
+        setConcerts(data.concerts);
+        setTotalPages(Math.max(data.totalPages, 1));
+        setTotalConcerts(data.total);
       } catch (requestError) {
         if (requestError.name === "AbortError") return;
 
@@ -51,7 +61,9 @@ export default function Concerts() {
       clearTimeout(timeoutId);
       controller.abort();
     };
-  }, [query, category, city, retryCount]);
+  }, [query, category, city, artist, dateFrom, dateTo, availability, sort, page, retryCount]);
+
+  useEffect(() => { setPage(1); }, [query, category, city, artist, dateFrom, dateTo, availability, sort]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -87,9 +99,15 @@ export default function Concerts() {
     setQuery("");
     setCategory("");
     setCity("");
+    setArtist("");
+    setDateFrom("");
+    setDateTo("");
+    setSort("date");
+    setAvailability("");
+    setPage(1);
   }
 
-  const hasFilters = Boolean(query.trim() || category || city);
+  const hasFilters = Boolean(query.trim() || category || city || artist.trim() || dateFrom || dateTo || availability);
 
   return (
     <section className="catalog-section">
@@ -111,11 +129,21 @@ export default function Concerts() {
           onCityChange={setCity}
           categories={categories}
           cities={cities}
+          artist={artist}
+          onArtistChange={setArtist}
+          dateFrom={dateFrom}
+          onDateFromChange={setDateFrom}
+          dateTo={dateTo}
+          onDateToChange={setDateTo}
+          sort={sort}
+          onSortChange={setSort}
+          availability={availability}
+          onAvailabilityChange={setAvailability}
         />
 
         <div className="results-bar">
           <p>
-            <strong>{loading ? "…" : concerts.length}</strong>{" "}
+            <strong>{loading ? "…" : totalConcerts}</strong>{" "}
             {loading ? "memuat konser" : "konser ditemukan"}
           </p>
 
@@ -167,6 +195,14 @@ export default function Concerts() {
               </button>
             )}
           </div>
+        )}
+
+        {!loading && !error && totalPages > 1 && (
+          <nav className="concert-pagination" aria-label="Halaman hasil konser">
+            <button type="button" disabled={page <= 1} onClick={() => setPage((current) => current - 1)}>Sebelumnya</button>
+            <span>Halaman {page} dari {totalPages}</span>
+            <button type="button" disabled={page >= totalPages} onClick={() => setPage((current) => current + 1)}>Berikutnya</button>
+          </nav>
         )}
 
         <p className="data-disclaimer">

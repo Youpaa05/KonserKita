@@ -79,6 +79,24 @@ const invalidPayloads = [
       quantity: 1.5,
     },
   },
+  {
+    name: "jumlah tiket melebihi batas per pesanan",
+    body: {
+      customerName: "Pengguna Tes",
+      customerEmail: "test@example.com",
+      ticketCategoryId: "1",
+      quantity: 101,
+    },
+  },
+  {
+    name: "jumlah tiket melebihi batas INTEGER",
+    body: {
+      customerName: "Pengguna Tes",
+      customerEmail: "test@example.com",
+      ticketCategoryId: "1",
+      quantity: 2147483648,
+    },
+  },
 ];
 
 for (const scenario of invalidPayloads) {

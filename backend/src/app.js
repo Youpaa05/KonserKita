@@ -1,72 +1,168 @@
-﻿import express from "express";
+import express from "express";
 import cors from "cors";
 import { checkDatabaseConnection } from "./config/database.js";
-import concertRouter from "./routes/concerts.js";
-import bookingRouter from "./routes/bookings.js";
+import concertRouterDefault from "./routes/concerts.js";
+import bookingRouterDefault from "./routes/bookings.js";
+import authRouterDefault from "./routes/auth.js";
+import adminRouterDefault from "./routes/admin.js";
+import customerRouterDefault from "./routes/customer.js";
+import paymentRouterDefault from "./routes/payments.js";
+import customerTicketRouterDefault from "./routes/customerTickets.js";
+import adminTicketRouterDefault from "./routes/adminTickets.js";
+import { sendError, sendSuccess } from "./utils/apiResponse.js";
+import { resolveSessionSameSite } from "./utils/session.js";
 
-const app = express();
+export function resolveCorsOrigin(environment = process.env) {
+  const configuredOrigin = environment.FRONTEND_URL?.trim();
 
-app.disable("x-powered-by");
-
-app.use(
-  cors({
-    origin: process.env.FRONTEND_URL || "http://localhost:5173",
-  }),
-);
-
-app.use(express.json({ limit: "100kb" }));
-
-app.get("/api/health", (_req, res) => {
-  res.status(200).json({
-    success: true,
-    message: "KonserKita API berjalan.",
-    service: "konserkita-backend",
-  });
-});
-
-app.get("/api/health/db", async (_req, res) => {
-  const result = await checkDatabaseConnection();
-
-  if (!result.connected) {
-    return res.status(503).json({
-      success: false,
-      message: "Database belum dapat dihubungi.",
-      database: "unavailable",
-    });
+  if (!configuredOrigin) {
+    if (environment.NODE_ENV === "production") {
+      throw new Error("FRONTEND_URL must be set to an explicit production HTTPS origin.");
+    }
+    return "http://localhost:5173";
   }
 
-  return res.status(200).json({
-    success: true,
-    message: "Koneksi database berhasil.",
-    database: "connected",
-  });
-});
-
-app.use("/api/concerts", concertRouter);
-app.use("/api/bookings", bookingRouter);
-
-app.use((err, _req, res, _next) => {
-  if (err instanceof SyntaxError && "body" in err) {
-    return res.status(400).json({
-      success: false,
-      message: "Format JSON tidak valid.",
-    });
+  let parsedOrigin;
+  try {
+    parsedOrigin = new URL(configuredOrigin);
+  } catch {
+    throw new Error("FRONTEND_URL must be a valid origin.");
   }
 
-  console.error("API error:", err.message);
+  if (
+    configuredOrigin.includes("*") ||
+    parsedOrigin.origin !== configuredOrigin ||
+    parsedOrigin.username ||
+    parsedOrigin.password ||
+    (environment.NODE_ENV === "production" && parsedOrigin.protocol !== "https:")
+  ) {
+    throw new Error("FRONTEND_URL must be one exact origin; production requires HTTPS.");
+  }
 
-  return res.status(500).json({
-    success: false,
-    message: "Terjadi kesalahan pada server.",
-  });
-});
+  return configuredOrigin;
+}
 
-app.use((_req, res) => {
-  res.status(404).json({
-    success: false,
-    message: "Endpoint tidak ditemukan.",
+export function createApp({
+  concertRouter = concertRouterDefault,
+  bookingRouter = bookingRouterDefault,
+  authRouter = authRouterDefault,
+  adminRouter = adminRouterDefault,
+  customerRouter = customerRouterDefault,
+  paymentRouter = paymentRouterDefault,
+  customerTicketRouter = customerTicketRouterDefault,
+  adminTicketRouter = adminTicketRouterDefault,
+  databaseHealthCheck = checkDatabaseConnection,
+  logger = console,
+} = {}) {
+  resolveSessionSameSite();
+  const corsOrigin = resolveCorsOrigin();
+  const app = express();
+
+  app.disable("x-powered-by");
+  app.use((_req, res, next) => {
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("X-Frame-Options", "DENY");
+    res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+    res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+    res.setHeader(
+      "Content-Security-Policy",
+      "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: https:; connect-src 'self' https:",
+    );
+    if (process.env.NODE_ENV === "production") res.setHeader("Strict-Transport-Security", "max-age=31536000");
+    next();
   });
-});
+
+  app.use(
+    cors({
+      origin: corsOrigin,
+      credentials: true,
+    }),
+  );
+
+  app.use(express.json({ limit: "100kb" }));
+
+  app.get("/api/health", (_req, res) => {
+    return sendSuccess(
+      res,
+      200,
+      "KonserKita API berjalan.",
+      undefined,
+      { service: "konserkita-backend" },
+    );
+  });
+
+  app.get("/api/health/db", async (_req, res, next) => {
+    try {
+      const result = await databaseHealthCheck();
+
+      if (!result.connected) {
+        return sendError(
+          res,
+          503,
+          "Database belum dapat dihubungi.",
+          { database: "unavailable" },
+        );
+      }
+
+      return sendSuccess(
+        res,
+        200,
+        "Koneksi database berhasil.",
+        undefined,
+        { database: "connected" },
+      );
+    } catch (error) {
+      return next(error);
+    }
+  });
+
+  app.use("/api/concerts", concertRouter);
+  app.use("/api/bookings", bookingRouter);
+  app.use("/api/payments", paymentRouter);
+  app.use("/api/customer/tickets", customerTicketRouter);
+  app.use("/api/admin/tickets", adminTicketRouter);
+  app.use("/api/auth", authRouter);
+  app.use("/api/admin", adminRouter);
+  app.use("/api/customer", customerRouter);
+
+  app.use((err, _req, res, _next) => {
+    if (res.headersSent) return;
+
+    if (err?.type === "entity.parse.failed") {
+      return sendError(res, 400, "Format JSON tidak valid.");
+    }
+
+    if (err?.type === "entity.too.large") {
+      return sendError(res, 413, "Ukuran request terlalu besar.");
+    }
+
+    if (err?.type === "request.aborted") {
+      return sendError(res, 400, "Request tidak selesai dikirim.");
+    }
+
+    if (
+      err instanceof SyntaxError &&
+      Object.prototype.hasOwnProperty.call(err, "body")
+    ) {
+      return sendError(res, 400, "Format JSON tidak valid.");
+    }
+
+    logger.error("API request failed:", { name: err?.name || "Error", code: err?.code || "unknown" });
+
+    return sendError(
+      res,
+      500,
+      "Terjadi kesalahan pada server.",
+    );
+  });
+
+  app.use((_req, res) => {
+    return sendError(res, 404, "Endpoint tidak ditemukan.");
+  });
+
+  return app;
+}
+
+const app = createApp();
 
 export default app;
-

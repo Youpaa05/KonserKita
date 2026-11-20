@@ -1,4 +1,4 @@
-﻿import { test } from "node:test";
+import { test } from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
 import { createServer } from "node:http";
@@ -69,6 +69,7 @@ async function withApi(pool, run) {
 function createMockPool({
   categoryResult = { rowCount: 1, rows: [category] },
   insertError = null,
+  paymentInsertError = null,
   categoryError = null,
   quotaResult = { rowCount: 1, rows: [{ quota: 8 }] },
   quotaError = null,
@@ -102,6 +103,11 @@ function createMockPool({
       if (normalized.startsWith("INSERT INTO bookings")) {
         if (insertError) throw insertError;
         return { rowCount: 1, rows: [booking] };
+      }
+
+      if (normalized.startsWith("INSERT INTO payments")) {
+        if (paymentInsertError) throw paymentInsertError;
+        return { rowCount: 1, rows: [] };
       }
 
       if (normalized.startsWith("UPDATE ticket_categories")) {
@@ -177,6 +183,21 @@ test("rollback ketika INSERT booking gagal", async () => {
     assert.equal(body.success, false);
   });
 
+  assert.ok(mock.calls.includes("ROLLBACK"));
+  assert.ok(!mock.calls.includes("COMMIT"));
+  assert.equal(mock.released, 1);
+});
+
+test("rollback kuota dan booking ketika INSERT payment gagal", async () => {
+  const mock = createMockPool({
+    paymentInsertError: new Error("simulated payment insert failure"),
+  });
+  await withApi(mock.pool, async (baseUrl) => {
+    const response = await postBooking(baseUrl);
+    assert.equal(response.status, 500);
+  });
+  assert.ok(mock.calls.some((call) => call.startsWith("INSERT INTO bookings")));
+  assert.ok(mock.calls.some((call) => call.startsWith("UPDATE ticket_categories")));
   assert.ok(mock.calls.includes("ROLLBACK"));
   assert.ok(!mock.calls.includes("COMMIT"));
   assert.equal(mock.released, 1);
@@ -272,6 +293,14 @@ test("transaksi berhasil melakukan COMMIT dan melepas koneksi", async () => {
 
   assert.ok(mock.calls.includes("COMMIT"));
   assert.ok(!mock.calls.includes("ROLLBACK"));
+  assert.ok(
+    mock.calls.some(
+      (call) =>
+        call.startsWith("SELECT tc.id") &&
+        call.includes("tc.archived_at IS NULL"),
+    ),
+    "Booking harus memeriksa status aktif kategori.",
+  );
   assert.equal(mock.released, 1);
 });
 
@@ -381,5 +410,98 @@ test("GET booking mengembalikan 500 saat query database gagal", async () => {
     const body = await response.json();
     assert.equal(body.success, false);
     assert.equal(typeof body.message, "string");
+  });
+
+  test("booking bersamaan tidak menjual kuota yang sama dua kali", async () => {
+    const state = { quota: 2, bookings: [], payments: 0 };
+    let nextBookingId = 1;
+    let categoryLock = Promise.resolve();
+
+    const pool = {
+      async connect() {
+        let releaseCategory;
+
+        return {
+          async query(sql, values = []) {
+            const normalized = sql.trim().replace(/\s+/g, " ");
+
+            if (normalized === "BEGIN") return { rowCount: null, rows: [] };
+            if (normalized === "COMMIT" || normalized === "ROLLBACK") {
+              releaseCategory?.();
+              releaseCategory = null;
+              return { rowCount: null, rows: [] };
+            }
+
+            if (normalized.startsWith("SELECT tc.id")) {
+              assert.match(normalized, /FOR UPDATE OF tc/);
+              const previousLock = categoryLock;
+              let unlock;
+              categoryLock = new Promise((resolve) => { unlock = resolve; });
+              await previousLock;
+              releaseCategory = unlock;
+              return {
+                rowCount: 1,
+                rows: [{
+                  ...category,
+                  quota: state.quota,
+                }],
+              };
+            }
+
+            if (normalized.startsWith("INSERT INTO bookings")) {
+              const id = String(nextBookingId++);
+              const quantity = values[5];
+              state.bookings.push({ id, quantity });
+              return {
+                rowCount: 1,
+                rows: [{
+                  ...booking,
+                  id,
+                  quantity,
+                  totalPrice: Number(category.price) * quantity,
+                }],
+              };
+            }
+
+            if (normalized.startsWith("UPDATE ticket_categories")) {
+              const [quantity] = values;
+              if (state.quota < quantity) return { rowCount: 0, rows: [] };
+              state.quota -= quantity;
+              return { rowCount: 1, rows: [{ quota: state.quota }] };
+            }
+
+            if (normalized.startsWith("INSERT INTO payments")) {
+              state.payments += 1;
+              return { rowCount: 1, rows: [] };
+            }
+
+            throw new Error(`Query mock tidak dikenali: ${normalized}`);
+          },
+          release() {
+            releaseCategory?.();
+            releaseCategory = null;
+          },
+        };
+      },
+      async query() {
+        throw new Error("pool.query tidak diharapkan pada POST test");
+      },
+    };
+
+    await withApi(pool, async (baseUrl) => {
+      const responses = await Promise.all([
+        postBooking(baseUrl),
+        postBooking(baseUrl),
+      ]);
+
+      assert.deepEqual(
+        responses.map((response) => response.status).sort(),
+        [201, 409],
+      );
+    });
+
+    assert.equal(state.quota, 0);
+    assert.equal(state.bookings.length, 1);
+    assert.equal(state.payments, 1);
   });
 });

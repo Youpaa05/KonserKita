@@ -4,52 +4,53 @@
 
 - Node.js dan npm.
 - PostgreSQL.
-- Database lokal yang sudah disiapkan.
-- File `backend/.env` yang dikonfigurasi secara lokal.
+- Database lokal yang sudah disiapkan sesuai [panduan database](database-setup.md).
+- File environment lokal `backend/.env`.
+
+Semua perintah di bawah dijalankan dari root repository, kecuali disebutkan lain.
 
 ## 1. Instalasi dependency
 
-Backend:
-
 ```powershell
-cd D:\KonserKita\backend
-npm install
-```
-
-Frontend, pada terminal terpisah:
-
-```powershell
-cd D:\KonserKita\frontend
-npm install
+npm --prefix backend ci
+npm --prefix frontend ci
 ```
 
 Jangan menghapus lockfile hanya untuk menyelesaikan masalah instalasi.
 
-## 2. Jalankan backend
+## 2. Konfigurasi environment
 
 ```powershell
-cd D:\KonserKita\backend
-npm run dev
+Copy-Item backend\.env.example backend\.env
 ```
 
-Backend menggunakan `src/server.js` sebagai entry point dan `src/app.js` untuk konfigurasi aplikasi Express.
+Isi `backend/.env` dengan konfigurasi PostgreSQL lokal. Gunakan `DATABASE_URL` atau konfigurasi terpisah `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, dan `DB_PASSWORD`. Koneksi loopback `DB_*` di development memakai non-TLS; koneksi remote selalu memakai TLS terverifikasi. `DATABASE_SSL=false` hanya diizinkan untuk koneksi lokal di luar production. Jangan menaruh nilai environment nyata dalam dokumentasi atau Git. `FRONTEND_URL` default ke origin Vite lokal, cookie session memakai `SameSite=Lax`, dan backend menggunakan `PORT` atau default 3000.
 
-Periksa pesan startup di terminal. Jangan menyalin nilai rahasia dari environment ke log.
+Siapkan schema sesuai [panduan database](database-setup.md). Jangan menjalankan migration sebelum memastikan database lokal yang dituju dan memahami perubahan schema.
 
-## 3. Jalankan frontend
+## 3. Jalankan backend
 
-Pada terminal lain:
+Di terminal pertama:
 
 ```powershell
-cd D:\KonserKita\frontend
-npm run dev
+npm --prefix backend run dev
+```
+
+Backend memakai `backend/src/server.js` sebagai entry point dan `backend/src/app.js` untuk konfigurasi Express. Jangan menyalin nilai rahasia dari environment ke log.
+
+## 4. Jalankan frontend
+
+Di terminal kedua:
+
+```powershell
+npm --prefix frontend run dev
 ```
 
 Buka URL lokal yang dicetak Vite. Port aktual dapat berbeda jika port default sedang digunakan.
 
-Pastikan frontend dapat mengakses API sesuai konfigurasi lokal dan `FRONTEND_URL` backend.
+Vite memproxy `/api` ke backend lokal. Pastikan origin frontend cocok dengan `FRONTEND_URL` backend.
 
-## 4. Pemeriksaan dasar API
+## 5. Pemeriksaan dasar API
 
 Gunakan browser atau alat HTTP untuk memeriksa:
 
@@ -57,30 +58,22 @@ Gunakan browser atau alat HTTP untuk memeriksa:
 - `GET /api/health/db`
 - `GET /api/concerts`
 
-Gunakan base URL backend dan port aktual dari konfigurasi lokal. Respons endpoint harus diperiksa, bukan diasumsikan.
+Respons endpoint harus diperiksa, bukan diasumsikan.
 
-## 5. Pemeriksaan kualitas
-
-Backend:
+## 6. Pemeriksaan kualitas
 
 ```powershell
-cd D:\KonserKita\backend
-npm test
-```
-
-Frontend:
-
-```powershell
-cd D:\KonserKita\frontend
-npm run lint
-npm run build
+npm --prefix backend test
+npm --prefix frontend test
+npm --prefix frontend run lint
+npm --prefix frontend run build
 ```
 
 Catat exit code dan pesan kegagalan jika ada. Jangan menyatakan pemeriksaan lulus apabila perintah tidak dijalankan.
 
-## 6. Batasan pengujian
+## 7. Batasan pengujian
 
 Tes backend saat ini mencakup validasi dan skenario transaksi berbasis mock. Jangan menyimpulkan seluruh alur database nyata sudah lolos hanya berdasarkan tes tersebut.
 
-Hindari mengirim request POST pemesanan ke database yang kuotanya ingin dipertahankan. Gunakan database pengujian terpisah jika kelak diperlukan pengujian integrasi yang mengubah data.
+Hindari mengirim request POST pemesanan ke database yang kuotanya ingin dipertahankan. Gunakan database pengujian terpisah jika kelak diperlukan pengujian integrasi yang mengubah data. Jangan menjalankan `npm --prefix backend run db:migrate` terhadap database production atau Neon; lihat [panduan database](database-setup.md).
 

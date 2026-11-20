@@ -1,9 +1,14 @@
-﻿import express from "express";
+import express from "express";
 import { randomBytes } from "node:crypto";
 import { pool as defaultPool } from "../config/database.js";
+import { sendError, sendSuccess } from "../utils/apiResponse.js";
+import { createRequireAuth } from "../middleware/requireAuth.js";
+import { readSessionToken } from "../utils/session.js";
+import { createRateLimiter } from "../middleware/rateLimit.js";
 
 const MAX_NAME_LENGTH = 150;
 const MAX_EMAIL_LENGTH = 254;
+const MAX_BOOKING_QUANTITY = 100;
 const BOOKING_CODE_PATTERN = /^KK-[A-F0-9]{16}$/;
 const MAX_BIGINT = 9223372036854775807n;
 
@@ -23,6 +28,7 @@ function validateBookingInput(body) {
       : "";
 
   const rawCategoryId = body.ticketCategoryId;
+
   const ticketCategoryId =
     typeof rawCategoryId === "number" &&
     Number.isSafeInteger(rawCategoryId)
@@ -60,7 +66,7 @@ function validateBookingInput(body) {
     return { valid: false };
   }
 
-  if (!Number.isSafeInteger(quantity) || quantity < 1) {
+  if (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > MAX_BOOKING_QUANTITY) {
     return { valid: false };
   }
 
@@ -85,24 +91,51 @@ export function createBookingRouter({
   generateBookingCode = createBookingCode,
 } = {}) {
   const router = express.Router();
+  const requireAuth = createRequireAuth({ pool });
+  const bookingCreationLimit = createRateLimiter({ scope: "booking-create", windowMs: 15 * 60 * 1000, max: 30, pool });
+  const bookingLookupLimit = createRateLimiter({ scope: "booking-lookup", windowMs: 15 * 60 * 1000, max: 120, pool });
 
-  router.post("/", async (req, res) => {
+  // Guest tetap dapat memesan. Jika session tersedia, booking
+  // wajib terhubung dengan akun customer yang terautentikasi.
+  function optionalCustomerAuth(req, res, next) {
+    let token;
+
+    try {
+      token = readSessionToken(req);
+    } catch {
+      return sendError(res, 401, "Session tidak valid.");
+    }
+
+    if (!token) return next();
+
+    return requireAuth(req, res, () => {
+      if (req.user?.role !== "customer") {
+        return sendError(
+          res,
+          403,
+          "Hanya akun customer yang dapat membuat pesanan.",
+        );
+      }
+
+      return next();
+    });
+  }
+
+  router.post("/", bookingCreationLimit, optionalCustomerAuth, async (req, res) => {
     const validation = validateBookingInput(req.body);
 
     if (!validation.valid) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Data pesanan tidak valid. Periksa nama, email, kategori tiket, dan jumlah tiket.",
-      });
+      return sendError(
+        res,
+        400,
+        "Data pesanan tidak valid. Periksa nama, email, kategori tiket, dan jumlah tiket.",
+      );
     }
 
-    const {
-      customerName,
-      customerEmail,
-      ticketCategoryId,
-      quantity,
-    } = validation.value;
+    const customerName = req.user?.name ?? validation.value.customerName;
+    const customerEmail = req.user?.email ?? validation.value.customerEmail;
+    const { ticketCategoryId, quantity } = validation.value;
+    const userId = req.user?.id ?? null;
 
     let client;
     let transactionStarted = false;
@@ -125,6 +158,8 @@ export function createBookingRouter({
          FROM ticket_categories AS tc
          JOIN concerts AS c ON c.id = tc.concert_id
          WHERE tc.id = $1::bigint
+            AND c.archived_at IS NULL
+            AND tc.archived_at IS NULL
          FOR UPDATE OF tc`,
         [ticketCategoryId],
       );
@@ -133,10 +168,11 @@ export function createBookingRouter({
         await client.query("ROLLBACK");
         transactionStarted = false;
 
-        return res.status(404).json({
-          success: false,
-          message: "Kategori tiket tidak ditemukan.",
-        });
+        return sendError(
+          res,
+          404,
+          "Kategori tiket tidak ditemukan.",
+        );
       }
 
       const category = categoryResult.rows[0];
@@ -145,11 +181,12 @@ export function createBookingRouter({
         await client.query("ROLLBACK");
         transactionStarted = false;
 
-        return res.status(409).json({
-          success: false,
-          message: "Kuota tiket tidak mencukupi.",
-          availableQuota: category.quota,
-        });
+        return sendError(
+          res,
+          409,
+          "Kuota tiket tidak mencukupi.",
+          { availableQuota: category.quota },
+        );
       }
 
       const bookingCode = generateBookingCode();
@@ -157,6 +194,7 @@ export function createBookingRouter({
       const bookingResult = await client.query(
         `INSERT INTO bookings (
            booking_code,
+           user_id,
            ticket_category_id,
            customer_name,
            customer_email,
@@ -164,7 +202,7 @@ export function createBookingRouter({
            unit_price,
            status
          )
-         VALUES ($1, $2::bigint, $3, $4, $5, $6, 'pending')
+         VALUES ($1, $2::bigint, $3::bigint, $4, $5, $6, $7, 'pending')
          RETURNING
            id::text AS id,
            booking_code AS "bookingCode",
@@ -176,6 +214,7 @@ export function createBookingRouter({
            created_at AS "createdAt"`,
         [
           bookingCode,
+          userId,
           ticketCategoryId,
           customerName,
           customerEmail,
@@ -193,24 +232,41 @@ export function createBookingRouter({
         [quantity, ticketCategoryId],
       );
 
+      await client.query(
+        `INSERT INTO payments (booking_id, amount, payment_method, expires_at)
+         VALUES ($1::bigint, $2, 'simulation', clock_timestamp() + INTERVAL '15 minutes')`,
+        [bookingResult.rows[0].id, bookingResult.rows[0].totalPrice],
+      );
+
+      if (userId) {
+        await client.query(
+          `INSERT INTO user_notifications (user_id, event_key, type, title, message, booking_code)
+           VALUES ($1::bigint, $2, 'booking_created', 'Pesanan berhasil dibuat',
+                   'Pesanan Anda menunggu pembayaran simulasi.', $3)
+           ON CONFLICT (user_id, event_key) DO NOTHING`,
+          [userId, `booking:${bookingResult.rows[0].id}:created`, bookingCode],
+        );
+      }
+
       if (quotaResult.rowCount !== 1) {
         await client.query("ROLLBACK");
         transactionStarted = false;
 
-        return res.status(409).json({
-          success: false,
-          message: "Kuota tiket berubah. Silakan coba kembali.",
-        });
+        return sendError(
+          res,
+          409,
+          "Kuota tiket berubah. Silakan coba kembali.",
+        );
       }
 
       await client.query("COMMIT");
       transactionStarted = false;
 
-      return res.status(201).json({
-        success: true,
-        message:
-          "Pesanan berhasil dibuat. Pembayaran masih berupa simulasi.",
-        data: {
+      return sendSuccess(
+        res,
+        201,
+        "Pesanan berhasil dibuat. Pembayaran masih berupa simulasi.",
+        {
           ...bookingResult.rows[0],
           concert: {
             slug: category.concert_slug,
@@ -220,7 +276,7 @@ export function createBookingRouter({
           remainingQuota: quotaResult.rows[0].quota,
           paymentSimulation: true,
         },
-      });
+      );
     } catch (error) {
       if (client && transactionStarted) {
         try {
@@ -233,28 +289,41 @@ export function createBookingRouter({
         }
       }
 
-      logger.error("Booking creation failed:", error.message);
+      logger.error("Booking creation failed:", { name: error?.name || "Error", code: error?.code || "unknown" });
 
-      return res.status(500).json({
-        success: false,
-        message: "Pesanan gagal diproses. Silakan coba kembali.",
-      });
+      return sendError(
+        res,
+        500,
+        "Pesanan gagal diproses. Silakan coba kembali.",
+      );
     } finally {
       client?.release();
     }
   });
 
-  router.get("/:bookingCode", async (req, res) => {
-    const bookingCode = req.params.bookingCode.trim().toUpperCase();
+  router.get("/:bookingCode", bookingLookupLimit, optionalCustomerAuth, async (req, res) => {
+    const rawCode = req.params.bookingCode;
+
+    const bookingCode =
+      typeof rawCode === "string"
+        ? rawCode.trim().toUpperCase()
+        : "";
 
     if (!BOOKING_CODE_PATTERN.test(bookingCode)) {
-      return res.status(400).json({
-        success: false,
-        message: "Format kode pesanan tidak valid.",
-      });
+      return sendError(
+        res,
+        400,
+        "Format kode pesanan tidak valid.",
+      );
     }
 
     try {
+      const ownershipCondition = req.user
+        ? "(b.user_id IS NULL OR b.user_id = $2::bigint)"
+        : "b.user_id IS NULL";
+      const values = req.user
+        ? [bookingCode, req.user.id]
+        : [bookingCode];
       const result = await pool.query(
         `SELECT
            b.booking_code AS "bookingCode",
@@ -264,41 +333,49 @@ export function createBookingRouter({
            b.total_price::double precision AS "totalPrice",
            b.status,
            b.created_at AS "createdAt",
+           p.status AS "paymentStatus",
+           p.expires_at AS "paymentExpiresAt",
            tc.name AS "ticketCategory",
            c.slug AS "concertSlug",
            c.title AS "concertTitle",
            to_char(c.event_date, 'YYYY-MM-DD') AS "eventDate",
            to_char(c.event_time, 'HH24:MI') AS "eventTime"
          FROM bookings AS b
+         JOIN payments AS p ON p.booking_id = b.id
          JOIN ticket_categories AS tc
            ON tc.id = b.ticket_category_id
          JOIN concerts AS c
            ON c.id = tc.concert_id
-         WHERE b.booking_code = $1`,
-        [bookingCode],
+         WHERE b.booking_code = $1
+           AND ${ownershipCondition}`,
+        values,
       );
 
       if (result.rowCount === 0) {
-        return res.status(404).json({
-          success: false,
-          message: "Pesanan tidak ditemukan.",
-        });
+        return sendError(
+          res,
+          404,
+          "Pesanan tidak ditemukan.",
+        );
       }
 
-      return res.status(200).json({
-        success: true,
-        data: {
+      return sendSuccess(
+        res,
+        200,
+        "Detail pesanan berhasil ditemukan.",
+        {
           ...result.rows[0],
           paymentSimulation: true,
         },
-      });
+      );
     } catch (error) {
-      logger.error("Booking lookup failed:", error.message);
+      logger.error("Booking lookup failed:", { name: error?.name || "Error", code: error?.code || "unknown" });
 
-      return res.status(500).json({
-        success: false,
-        message: "Pesanan gagal dicari. Silakan coba kembali.",
-      });
+      return sendError(
+        res,
+        500,
+        "Pesanan gagal dicari. Silakan coba kembali.",
+      );
     }
   });
 

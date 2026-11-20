@@ -80,3 +80,18 @@ Thumbs.db
 
 # Local Netlify folder
 .netlify
+
+# Local database backups
+/backups/
+
+# KonserKita publication exclusions
+*.bak
+*.dump
+*.swp
+/KonserKita/
+/.fase*-backup-*/
+/.fase*-fix-*/
+/.atomic-registration-backup-*/
+**/dist/
+**/coverage/
+**/.netlify/

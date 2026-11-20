@@ -1,9 +1,27 @@
-﻿import { Link } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import ConcertCard from "../components/ConcertCard";
-import { concerts } from "../data/concerts";
+import Loading from "../components/Loading";
+import { getConcerts } from "../services/api";
 
 export default function Home() {
-  const featured = concerts.slice(0, 3);
+  const [featured, setFeatured] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [retryCount, setRetryCount] = useState(0);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setLoading(true);
+    setError("");
+    getConcerts({ page: 1, limit: 3, sort: "date", direction: "asc" }, { signal: controller.signal })
+      .then((data) => setFeatured(Array.isArray(data?.concerts) ? data.concerts : []))
+      .catch((requestError) => {
+        if (requestError.name !== "AbortError") setError(requestError.message);
+      })
+      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    return () => controller.abort();
+  }, [retryCount]);
 
   return (
     <>
@@ -25,7 +43,7 @@ export default function Home() {
             </div>
           </div>
 
-          <div className="hero-visual" aria-label="Ilustrasi suasana konser">
+          <div className="hero-visual">
             <div className="hero-image-main">
               <img src="https://images.unsplash.com/photo-1459749411175-04bf5292ceea?auto=format&fit=crop&w=1100&q=90" alt="Panggung konser dengan pencahayaan dramatis" />
               <div className="hero-image-shade" />
@@ -45,9 +63,17 @@ export default function Home() {
             <div><span className="section-kicker">PILIHAN UNTUKMU</span><h2>Panggung yang <span>memanggil.</span></h2><p>Beberapa pengalaman musik yang layak masuk rencanamu.</p></div>
             <Link className="text-link" to="/concerts">Lihat semua konser <span>↗</span></Link>
           </div>
-          <div className="concert-grid">
-            {featured.map((concert) => <ConcertCard key={concert.id} concert={concert} />)}
-          </div>
+          {loading ? <Loading message="Memuat konser pilihan..." /> : error ? (
+            <div className="empty-state" role="alert">
+              <h3>Konser pilihan belum dapat dimuat</h3>
+              <p>{error}</p>
+              <button className="button button-primary" type="button" onClick={() => setRetryCount((count) => count + 1)}>Coba lagi</button>
+            </div>
+          ) : featured.length ? (
+            <div className="concert-grid">
+              {featured.map((concert) => <ConcertCard key={concert.id} concert={concert} />)}
+            </div>
+          ) : <div className="empty-state"><h3>Belum ada konser aktif</h3><p>Konser yang tersedia akan tampil di sini.</p></div>}
         </div>
       </section>
 
@@ -57,7 +83,7 @@ export default function Home() {
           <div className="experience-steps">
             <div><span>01</span><p><strong>Temukan konser</strong><small>Jelajahi acara sesuai seleramu.</small></p></div>
             <div><span>02</span><p><strong>Pilih pengalaman</strong><small>Lihat detail acara dan pilihan tiket.</small></p></div>
-            <div><span>03</span><p><strong>Siap untuk musik</strong><small>Alur pemesanan akan dikembangkan berikutnya.</small></p></div>
+            <div><span>03</span><p><strong>Siap untuk musik</strong><small>Simpan tiket digital dan tunjukkan QR saat masuk.</small></p></div>
           </div>
         </div>
       </section>

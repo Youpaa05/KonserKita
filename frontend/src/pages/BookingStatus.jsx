@@ -74,6 +74,7 @@ export default function BookingStatus() {
           <p>Waktu acara: {booking.eventTime} WIB</p>
           <p>Total: <strong>{formatPrice(booking.totalPrice)}</strong></p>
           <p>Status pesanan: <strong>{booking.status}</strong></p>
+          <p>Status pembayaran: <strong>{booking.paymentStatus || "-"}</strong></p>
           <p className="detail-note">
             Pembayaran masih berupa simulasi. Status ini berasal dari database
             dan bukan bukti pembayaran.
@@ -84,6 +85,11 @@ export default function BookingStatus() {
           >
             Lihat detail konser
           </Link>
+          {booking.paymentStatus === "pending" && (
+            <Link className="button button-primary" to={`/payments/${booking.bookingCode}`}>
+              Lanjutkan pembayaran simulasi
+            </Link>
+          )}
         </div>
       )}
 

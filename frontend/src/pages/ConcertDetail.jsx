@@ -204,7 +204,7 @@ export default function ConcertDetail() {
             {bookingResult ? (
               <div className="booking-result" role="status">
                 <h2>Pesanan berhasil dibuat</h2>
-                <p>{bookingResult.message}</p>
+                <p>Pesanan menunggu pembayaran simulasi.</p>
                 <p>
                   Kode pesanan:{" "}
                   <strong>{bookingResult.bookingCode}</strong>
@@ -216,6 +216,9 @@ export default function ConcertDetail() {
                   Total: <strong>{formatPrice(bookingResult.totalPrice)}</strong>
                 </p>
                 <p>Status: {bookingResult.status}</p>
+                <Link className="button button-primary" to={`/payments/${bookingResult.bookingCode}`}>
+                  Lanjutkan pembayaran simulasi
+                </Link>
                 <button
                   className="button button-ghost"
                   type="button"
