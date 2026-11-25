@@ -29,7 +29,7 @@ export default function AdminTicketCheck() {
       </div>
       <form className="ticket-check-form" onSubmit={handleSubmit}>
         <label htmlFor="ticket-code">Kode tiket</label>
-        <input id="ticket-code" value={ticketCode} onChange={(event) => setTicketCode(event.target.value.toUpperCase())} placeholder="KK-TKT-..." autoComplete="off" required />
+        <input id="ticket-code" value={ticketCode} onChange={(event) => setTicketCode(event.target.value.toUpperCase())} placeholder="KK-TKT-..." autoComplete="off" autoFocus required />
         <button className="button button-primary" type="submit" disabled={busy}>{busy ? "Memeriksa..." : "Validasi dan gunakan tiket"}</button>
       </form>
       {error && <p className="dashboard-error" role="alert">{error}</p>}
@@ -43,6 +43,7 @@ export default function AdminTicketCheck() {
           <p>Kategori: {ticket.ticketCategory} · Tiket #{ticket.ticketNumber}</p>
           <p>Booking: {ticket.bookingCode}</p>
           <p>Waktu validasi: {new Date(ticket.usedAt).toLocaleString("id-ID")}</p>
+          <p>Petugas: {ticket.validatorName || "Admin yang sedang login"}</p>
         </article>
       )}
     </section>

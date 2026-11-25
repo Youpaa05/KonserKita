@@ -24,9 +24,9 @@ Gunakan database fixture/test atau akun yang boleh dibuat dan diubah. Jangan gun
 - [ ] Cari konser dengan kata, kategori, lokasi, tanggal, availability, sorting, dan pagination.
 - [ ] Buka detail, pilih kategori/quantity tersedia, dan buat booking pada fixture.
 - [ ] Booking pending membuat payment pending dan mengurangi kuota sebanyak quantity.
-- [ ] Simulasikan success: payment paid, booking confirmed, tiket dan QR tampil.
+- [ ] Pastikan payment attempt menjawab HTTP 503 saat gateway belum tersedia, tanpa mengubah payment/booking atau menerbitkan tiket.
 - [ ] Customer berbeda tidak dapat membuka tiket customer lain.
-- [ ] Simulasikan failure/expiry pada fixture: status dan pemulihan kuota tepat.
+- [ ] Uji expiry pada fixture: status dan pemulihan kuota tepat.
 - [ ] Cek booking guest menggunakan kode yang valid; jangan bagikan kode tersebut.
 - [ ] Tambah/hapus favorit dan verifikasi ownership.
 - [ ] Update profil; password saat ini salah ditolak, perubahan valid mencabut sesi sesuai kebijakan.

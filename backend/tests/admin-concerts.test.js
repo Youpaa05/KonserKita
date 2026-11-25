@@ -216,6 +216,30 @@ test("admin API menolak customer dengan HTTP 403", async () => {
   });
 });
 
+test("pembatalan konser hanya admin, wajib beralasan, dan tidak menghapus relasi transaksi", async () => {
+  await withApi({ role: "customer" }, async ({ baseUrl, cookie }) => {
+    const response = await request(baseUrl, "/api/admin/concerts/42/cancel", {
+      method: "POST", headers: { ...adminHeaders(cookie), "Content-Type": "application/json" },
+      body: JSON.stringify({ reason: "Jadwal berubah" }),
+    });
+    assert.equal(response.status, 403);
+  });
+  await withApi({}, async ({ baseUrl, cookie, calls }) => {
+    const invalid = await request(baseUrl, "/api/admin/concerts/42/cancel", {
+      method: "POST", headers: { ...adminHeaders(cookie), "Content-Type": "application/json" },
+      body: JSON.stringify({ reason: " " }),
+    });
+    assert.equal(invalid.status, 400);
+    const response = await request(baseUrl, "/api/admin/concerts/42/cancel", {
+      method: "POST", headers: { ...adminHeaders(cookie), "Content-Type": "application/json" },
+      body: JSON.stringify({ reason: "Jadwal berubah" }),
+    });
+    assert.equal(response.status, 200);
+    assert.ok(calls.some((sql) => sql.startsWith("UPDATE concerts SET cancelled_at=")));
+    assert.ok(!calls.some((sql) => sql.startsWith("DELETE FROM")));
+  });
+});
+
 test("endpoint pesanan admin menolak pengguna tanpa sesi dan customer", async () => {
   await withApi({ authenticated: false }, async ({ baseUrl }) => {
     const response = await request(baseUrl, "/api/admin/orders");

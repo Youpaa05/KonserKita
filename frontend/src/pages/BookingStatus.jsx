@@ -29,7 +29,7 @@ export default function BookingStatus() {
 
   return (
     <section className="container booking-status-section">
-      <span className="section-kicker">KONSERKITA · DATA SIMULASI</span>
+      <span className="section-kicker">KONSERKITA · STATUS PESANAN</span>
       <h1>Cek status pesanan</h1>
       <p>Masukkan kode pesanan yang diperoleh setelah pemesanan berhasil.</p>
 
@@ -76,8 +76,8 @@ export default function BookingStatus() {
           <p>Status pesanan: <strong>{booking.status}</strong></p>
           <p>Status pembayaran: <strong>{booking.paymentStatus || "-"}</strong></p>
           <p className="detail-note">
-            Pembayaran masih berupa simulasi. Status ini berasal dari database
-            dan bukan bukti pembayaran.
+            Pembayaran belum terhubung ke payment gateway. Status yang ditampilkan
+            berasal dari data pesanan dan bukan bukti pembayaran nyata.
           </p>
           <Link
             className="button button-ghost"
@@ -87,7 +87,7 @@ export default function BookingStatus() {
           </Link>
           {booking.paymentStatus === "pending" && (
             <Link className="button button-primary" to={`/payments/${booking.bookingCode}`}>
-              Lanjutkan pembayaran simulasi
+              Lihat informasi pembayaran
             </Link>
           )}
         </div>

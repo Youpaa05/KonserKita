@@ -21,6 +21,13 @@ const POOL_OPTIONS = {
   idleTimeoutMillis: 30000,
 };
 
+const DEVELOPMENT_DATABASE = {
+  host: "localhost",
+  port: 5432,
+  name: "konserkita_db",
+  user: "postgres",
+};
+
 function isLoopbackHost(host) {
   const normalized = String(host || "").trim().toLowerCase().replace(/^\[|\]$/g, "");
   const isLoopbackIpv4 = isIP(normalized) === 4 && normalized.split(".")[0] === "127";
@@ -92,32 +99,84 @@ function parseDatabaseUrl(value) {
 
 export function buildDatabasePoolConfig(environment = process.env) {
   const databaseUrl = environment.DATABASE_URL?.trim();
+  const nodeEnvironment = environment.NODE_ENV;
+  const isProduction = nodeEnvironment === "production";
 
   if (databaseUrl) {
     const parsed = parseDatabaseUrl(databaseUrl);
+    if (!isProduction) {
+      if (nodeEnvironment === "test" && !isLoopbackHost(parsed.host)) {
+        throw new Error("Test DATABASE_URL must use a local database host.");
+      }
+
+      if (nodeEnvironment !== "test") {
+        const port = parsed.port === undefined || parsed.port === null
+          ? 5432
+          : Number(parsed.port);
+        const expectedHost = environment.DB_HOST?.trim() || DEVELOPMENT_DATABASE.host;
+        const expectedPort = parseDatabasePort(environment.DB_PORT);
+        const expectedDatabase = environment.DB_NAME?.trim() || DEVELOPMENT_DATABASE.name;
+        const expectedUser = environment.DB_USER?.trim() || DEVELOPMENT_DATABASE.user;
+
+        if (
+          !isLoopbackHost(expectedHost) ||
+          expectedHost.toLowerCase() !== DEVELOPMENT_DATABASE.host ||
+          expectedHost.toLowerCase() !== parsed.host.toLowerCase() ||
+          expectedPort !== DEVELOPMENT_DATABASE.port ||
+          port !== expectedPort ||
+          expectedDatabase !== DEVELOPMENT_DATABASE.name ||
+          parsed.database !== expectedDatabase ||
+          expectedUser !== DEVELOPMENT_DATABASE.user ||
+          expectedUser !== parsed.user
+        ) {
+          throw new Error("Development DATABASE_URL must match the configured local KonserKita database.");
+        }
+      }
+    }
+
     const ca = environment.DATABASE_SSL_CA || parsed.ssl?.ca;
     return {
       ...parsed,
       ssl: resolveDatabaseSsl(
-        environment.NODE_ENV,
+        nodeEnvironment,
         environment.DATABASE_SSL,
         ca,
         parsed.host,
-        true,
+        isProduction,
       ),
       ...POOL_OPTIONS,
     };
   }
 
-  const host = environment.DB_HOST?.trim() || "localhost";
+  const host = environment.DB_HOST?.trim() || DEVELOPMENT_DATABASE.host;
+  const port = parseDatabasePort(environment.DB_PORT);
+  const database = environment.DB_NAME?.trim();
+  const user = environment.DB_USER?.trim();
+
+  if (!isProduction) {
+    if (nodeEnvironment === "test") {
+      if (!isLoopbackHost(host)) {
+        throw new Error("Test database must use a local database host.");
+      }
+    } else if (
+      !isLoopbackHost(host) ||
+      host.toLowerCase() !== DEVELOPMENT_DATABASE.host ||
+      port !== DEVELOPMENT_DATABASE.port ||
+      database !== DEVELOPMENT_DATABASE.name ||
+      user !== DEVELOPMENT_DATABASE.user
+    ) {
+      throw new Error("Development database must be the configured local KonserKita database.");
+    }
+  }
+
   return {
     host,
-    port: parseDatabasePort(environment.DB_PORT),
-    database: environment.DB_NAME,
-    user: environment.DB_USER,
+    port,
+    database,
+    user,
     password: environment.DB_PASSWORD,
     ssl: resolveDatabaseSsl(
-      environment.NODE_ENV,
+      nodeEnvironment,
       environment.DATABASE_SSL,
       environment.DATABASE_SSL_CA,
       host,

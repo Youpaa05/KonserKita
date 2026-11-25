@@ -2,18 +2,18 @@
 
 ## Ringkasan proyek
 
-KonserKita adalah aplikasi web demo untuk alur pemesanan tiket konser. Aplikasi memisahkan pengalaman customer dan administrator, mengelola inventory kategori tiket, menyimulasikan pembayaran, dan membuat tiket digital yang validasinya diputuskan backend.
+KonserKita adalah platform web untuk menemukan konser, mengelola pemesanan tiket, serta menyediakan perangkat administrasi dan validasi tiket.
 
 ## Masalah dan pengguna
 
-Proyek ini mengeksplorasi alur dari penemuan acara sampai pemeriksaan tiket dalam satu aplikasi. Customer mencari konser, membuat pesanan sebagai guest atau customer, membayar dalam simulasi, dan mengakses tiket QR. Admin mengelola acara, meninjau laporan, dan memeriksa tiket.
+Customer dapat mencari konser, membuat dan meninjau pesanan, serta mengakses tiket QR yang validitasnya diperiksa oleh backend. Admin mengelola acara, meninjau laporan, dan memeriksa tiket.
 
 ## Fitur yang dapat didemokan
 
 - Katalog konser, pencarian, filter, detail, dan kategori tiket.
 - Authentication berbasis session untuk role customer/admin.
 - Booking dengan pengurangan kuota dalam transaksi database.
-- Payment simulation dengan status pending/paid/failed/expired dan expiry.
+- Pemantauan status pembayaran dan expiry; pembayaran online belum tersedia karena payment gateway belum terhubung.
 - E-ticket dengan kode acak dan QR; server memvalidasi dan menolak pemakaian ulang.
 - Favorit, profil, perubahan password, dan notifikasi aplikasi.
 - Dashboard dan laporan admin berbasis database.
@@ -38,8 +38,8 @@ Browser (React)
 
 1. Customer/guest memilih konser, kategori, dan jumlah tiket.
 2. Backend membuat booking dan payment pending serta mengurangi kuota dalam transaksi.
-3. Halaman payment mengirim outcome simulasi; expiry dikendalikan server/database.
-4. Payment paid mengonfirmasi booking dan menerbitkan tiket individual.
+3. Halaman payment menampilkan status dan instruksi yang tersedia; tidak ada pembayaran sungguhan atau gateway terhubung.
+4. Tiket hanya tersedia untuk booking yang memenuhi status pembayaran yang tercatat di database.
 5. QR berisi kode acak; endpoint admin memeriksa dan menandai tiket used secara atomik.
 
 Pembayaran bukan gateway atau transaksi sungguhan.
@@ -52,8 +52,8 @@ Tantangan yang dapat dijelaskan: menjaga kuota saat booking dibatalkan/expiry; m
 
 ## Batasan dan pengembangan berikutnya
 
-- Payment simulasi; tidak ada gateway/settlement.
-- Status lokal migration 001–007 pernah dilaporkan diterapkan tetapi belum diverifikasi saat ini; migration 008–009 belum dijalankan atau diuji pada PostgreSQL nyata.
+- Tidak ada gateway/settlement. Simulasi dapat diaktifkan secara eksplisit hanya pada development; konfigurasi default dan production menolak mutasi pembayaran. Simulasi bukan transaksi dana.
+- Status migration pada database lokal/staging/production tidak diverifikasi dalam batch ini. Keberadaan file migration tidak membuktikan migration sudah diterapkan; verifikasi target harus dilakukan dengan prosedur read-only yang aman sebelum demo yang memakai database tersebut.
 - PostgreSQL integration/concurrency dan browser E2E belum dijalankan pada lingkungan terisolasi.
 - QR camera fisik belum diuji.
 - Rate limiter production memakai PostgreSQL shared limiter, tetapi belum diuji lintas instance; konfigurasi development memakai in-memory limiter.
@@ -61,4 +61,4 @@ Tantangan yang dapat dijelaskan: menjaga kuota saat booking dibatalkan/expiry; m
 
 ## Screenshot
 
-Belum ada screenshot browser aktual yang diverifikasi. Jalankan aplikasi dengan data demo yang aman, lalu ambil screenshot Home, katalog/detail, e-ticket dengan data sintetis, dashboard admin, dan report. Jangan tampilkan email nyata, credential, token, booking code aktif, atau data rahasia. Ikuti [checklist QA](manual-qa-checklist.md).
+Belum ada screenshot browser aktual yang diverifikasi. Ambil screenshot hanya dari lingkungan lokal terisolasi dan data uji; jangan tampilkan email nyata, credential, token, booking code aktif, atau data rahasia. Ikuti [checklist QA](manual-qa-checklist.md).

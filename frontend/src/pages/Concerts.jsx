@@ -2,16 +2,19 @@
 import ConcertCard from "../components/ConcertCard";
 import SearchBar from "../components/SearchBar";
 import Loading from "../components/Loading";
+import { useSearchParams } from "react-router-dom";
 import { getConcerts } from "../services/api";
 
 export default function Concerts() {
-  const [query, setQuery] = useState("");
-  const [category, setCategory] = useState("");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [query, setQuery] = useState(() => searchParams.get("q") || "");
+  const [category, setCategory] = useState(() => searchParams.get("category") || "");
   const [city, setCity] = useState("");
   const [artist, setArtist] = useState("");
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
   const [sort, setSort] = useState("date");
+  const [direction, setDirection] = useState("asc");
   const [availability, setAvailability] = useState("");
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
@@ -22,6 +25,25 @@ export default function Concerts() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [retryCount, setRetryCount] = useState(0);
+  const [filterRetry, setFilterRetry] = useState(0);
+  const [filterOptionsError, setFilterOptionsError] = useState("");
+
+  useEffect(() => {
+    setQuery(searchParams.get("q") || "");
+    setCategory(searchParams.get("category") || "");
+  }, [searchParams]);
+
+  useEffect(() => {
+    const timeoutId = setTimeout(() => {
+      const nextParams = new URLSearchParams(searchParams);
+      if (query.trim()) nextParams.set("q", query.trim());
+      else nextParams.delete("q");
+      if (category) nextParams.set("category", category);
+      else nextParams.delete("category");
+      if (nextParams.toString() !== searchParams.toString()) setSearchParams(nextParams, { replace: true });
+    }, 300);
+    return () => clearTimeout(timeoutId);
+  }, [query, category, searchParams, setSearchParams]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -32,7 +54,7 @@ export default function Concerts() {
 
       try {
         const data = await getConcerts(
-          { query, category, city, artist, dateFrom, dateTo, availability, sort, page, limit: 12 },
+          { query, category, city, artist, dateFrom, dateTo, availability, sort, direction, page, limit: 12 },
           { signal: controller.signal },
         );
 
@@ -61,18 +83,19 @@ export default function Concerts() {
       clearTimeout(timeoutId);
       controller.abort();
     };
-  }, [query, category, city, artist, dateFrom, dateTo, availability, sort, page, retryCount]);
+  }, [query, category, city, artist, dateFrom, dateTo, availability, sort, direction, page, retryCount]);
 
-  useEffect(() => { setPage(1); }, [query, category, city, artist, dateFrom, dateTo, availability, sort]);
+  useEffect(() => { setPage(1); }, [query, category, city, artist, dateFrom, dateTo, availability, sort, direction]);
 
   useEffect(() => {
     const controller = new AbortController();
 
     async function loadFilterOptions() {
+      setFilterOptionsError("");
       try {
         const data = await getConcerts({}, { signal: controller.signal });
 
-        if (!Array.isArray(data)) return;
+        if (!Array.isArray(data)) throw new Error("Format opsi filter dari server tidak valid.");
 
         setCategories(
           [...new Set(data.map((concert) => concert.category).filter(Boolean))]
@@ -85,7 +108,7 @@ export default function Concerts() {
         );
       } catch (requestError) {
         if (requestError.name !== "AbortError") {
-          console.error("Gagal memuat opsi filter:", requestError.message);
+          setFilterOptionsError(requestError.message || "Opsi filter belum dapat dimuat.");
         }
       }
     }
@@ -93,7 +116,7 @@ export default function Concerts() {
     loadFilterOptions();
 
     return () => controller.abort();
-  }, []);
+  }, [filterRetry]);
 
   function resetFilters() {
     setQuery("");
@@ -103,11 +126,12 @@ export default function Concerts() {
     setDateFrom("");
     setDateTo("");
     setSort("date");
+    setDirection("asc");
     setAvailability("");
     setPage(1);
   }
 
-  const hasFilters = Boolean(query.trim() || category || city || artist.trim() || dateFrom || dateTo || availability);
+  const hasFilters = Boolean(query.trim() || category || city || artist.trim() || dateFrom || dateTo || availability || sort !== "date" || direction !== "asc");
 
   return (
     <section className="catalog-section">
@@ -137,9 +161,20 @@ export default function Concerts() {
           onDateToChange={setDateTo}
           sort={sort}
           onSortChange={setSort}
+          direction={direction}
+          onDirectionChange={setDirection}
           availability={availability}
           onAvailabilityChange={setAvailability}
         />
+
+        {filterOptionsError && (
+          <p className="filter-options-note" role="status">
+            Opsi kategori dan kota belum tersedia. {" "}
+            <button className="text-button" type="button" onClick={() => setFilterRetry((value) => value + 1)}>
+              Muat ulang opsi
+            </button>
+          </p>
+        )}
 
         <div className="results-bar">
           <p>
@@ -158,6 +193,7 @@ export default function Concerts() {
           )}
         </div>
 
+        <div className="catalog-results" aria-busy={loading}>
         {loading ? (
           <Loading message="Memuat konser dari server..." />
         ) : error ? (
@@ -196,6 +232,7 @@ export default function Concerts() {
             )}
           </div>
         )}
+        </div>
 
         {!loading && !error && totalPages > 1 && (
           <nav className="concert-pagination" aria-label="Halaman hasil konser">
@@ -206,7 +243,7 @@ export default function Concerts() {
         )}
 
         <p className="data-disclaimer">
-          Daftar acara dan harga merupakan data simulasi untuk keperluan demo.
+          Informasi jadwal, harga, dan ketersediaan mengikuti data konser yang tersedia di katalog.
         </p>
       </div>
     </section>

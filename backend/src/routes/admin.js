@@ -41,6 +41,35 @@ function addDatePredicates(values, column, range) {
   return conditions;
 }
 
+function csvCell(value) {
+  let text = value === null || value === undefined ? "" : String(value);
+  if (/^[\s]*[=+\-@\t\r]/.test(text)) text = `'${text}`;
+  return `"${text.replaceAll('"', '""')}"`;
+}
+
+function sendCsv(res, filename, headers, rows) {
+  const csv = [headers, ...rows].map((row) => row.map(csvCell).join(",")).join("\r\n");
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+  res.setHeader("Cache-Control", "no-store");
+  return res.status(200).send(`\uFEFF${csv}`);
+}
+
+function validateReportFilters(query, { statuses, dateColumn }) {
+  const range = parseDateRange(query);
+  const status = query.status === undefined ? "" : query.status;
+  const bookingCode = query.bookingCode === undefined ? "" : query.bookingCode;
+  const concertId = query.concertId === undefined ? "" : query.concertId;
+  if (!range || (status && !statuses.includes(status)) || typeof bookingCode !== "string" || bookingCode.length > 40 || /[^a-zA-Z0-9-]/.test(bookingCode) || (concertId && !isValidConcertId(concertId))) return null;
+  const values = [];
+  const conditions = [];
+  if (status) { values.push(status); conditions.push(`${dateColumn.status}=$${values.length}`); }
+  if (bookingCode) { values.push(`${bookingCode}%`); conditions.push(`b.booking_code ILIKE $${values.length}`); }
+  if (concertId) { values.push(concertId); conditions.push(`c.id=$${values.length}::bigint`); }
+  conditions.push(...addDatePredicates(values, dateColumn.date, range));
+  return { values, where: conditions.length ? `WHERE ${conditions.join(" AND ")}` : "", range };
+}
+
 async function rollbackTransaction(client, logger, operation, primaryError) {
   try {
     await client.query("ROLLBACK");
@@ -72,6 +101,101 @@ export function createAdminRouter({ pool = defaultPool, logger = console } = {})
   const requireAuth = createRequireAuth({ pool });
   const adminReadLimit = createRateLimiter({ scope: "admin-read", windowMs: 60 * 1000, max: 60, keyGenerator: (req) => req.user?.id || getClientIp(req), pool });
   const reportGuard = [requireAuth, requireRole(ROLES.ADMIN), adminReadLimit];
+  const concertAdminGuard = [requireAuth, requireRole(ROLES.ADMIN)];
+
+  router.get("/users", ...reportGuard, async (req, res, next) => {
+    const pagination = parsePagination(req.query);
+    const query = req.query.q === undefined ? "" : req.query.q;
+    const role = req.query.role === undefined ? "" : req.query.role;
+    if (!pagination || typeof query !== "string" || query.length > 100 || /[\u0000-\u001F\u007F]/.test(query) || (role && !["customer", "admin"].includes(role))) return sendError(res, 400, "Filter pengguna tidak valid.");
+    const values = [];
+    const conditions = [];
+    if (query) { values.push(`%${query}%`); conditions.push(`(u.name ILIKE $${values.length} OR u.email ILIKE $${values.length})`); }
+    if (role) { values.push(role); conditions.push(`r.name=$${values.length}`); }
+    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+    try {
+      const [count, result] = await Promise.all([
+        pool.query(`SELECT COUNT(*)::bigint AS total FROM users u JOIN roles r ON r.id=u.role_id ${where}`, values),
+        pool.query(`SELECT u.id::text AS id, u.name, u.email, r.name AS role, u.created_at AS "createdAt" FROM users u JOIN roles r ON r.id=u.role_id ${where} ORDER BY u.created_at DESC, u.id DESC LIMIT $${values.length + 1} OFFSET $${values.length + 2}`, [...values, pagination.limit, pagination.offset]),
+      ]);
+      const total = Number(count.rows[0].total);
+      return sendSuccess(res, 200, "Daftar pengguna berhasil dimuat.", { users: result.rows, total, page: pagination.page, limit: pagination.limit, totalPages: Math.ceil(total / pagination.limit) });
+    } catch (error) { return next(error); }
+  });
+
+  router.get("/audit/role-changes", ...reportGuard, async (req, res, next) => {
+    const pagination = parsePagination(req.query);
+    if (!pagination) return sendError(res, 400, "Parameter halaman audit tidak valid.");
+    try {
+      const [count, result] = await Promise.all([
+        pool.query("SELECT COUNT(*)::bigint AS total FROM admin_role_change_audit"),
+        pool.query(
+          `SELECT a.id::text AS id,
+                  a.previous_role AS "previousRole",
+                  a.new_role AS "newRole",
+                  a.affected_sessions AS "affectedSessions",
+                  a.changed_at AS "changedAt",
+                  actor.name AS "actorName",
+                  actor.email AS "actorEmail",
+                  target.name AS "targetName",
+                  target.email AS "targetEmail"
+           FROM admin_role_change_audit a
+           LEFT JOIN users actor ON actor.id=a.actor_user_id
+           LEFT JOIN users target ON target.id=a.target_user_id
+           ORDER BY a.changed_at DESC, a.id DESC
+           LIMIT $1 OFFSET $2`,
+          [pagination.limit, pagination.offset],
+        ),
+      ]);
+      const total = Number(count.rows[0].total);
+      return sendSuccess(res, 200, "Audit perubahan role berhasil dimuat.", {
+        events: result.rows,
+        total,
+        page: pagination.page,
+        limit: pagination.limit,
+        totalPages: Math.ceil(total / pagination.limit),
+      });
+    } catch (error) { return next(error); }
+  });
+
+  router.patch("/users/:userId/role", ...concertAdminGuard, async (req, res, next) => {
+    if (!isValidConcertId(req.params.userId) || !req.body || typeof req.body !== "object" || Array.isArray(req.body) || Object.keys(req.body).length !== 1 || !["customer", "admin"].includes(req.body.role)) return sendError(res, 400, "Perubahan role tidak valid.");
+    let client;
+    let rollbackFailed = false;
+    try {
+      client = await pool.connect();
+      await client.query("BEGIN");
+      await client.query("SELECT pg_advisory_xact_lock(2026112201)");
+      const target = await client.query(`SELECT u.id, r.name AS role FROM users u JOIN roles r ON r.id=u.role_id WHERE u.id=$1::bigint FOR UPDATE OF u`, [req.params.userId]);
+      if (!target.rowCount) {
+        rollbackFailed = await rollbackTransaction(client, logger, "change-user-role");
+        if (rollbackFailed) return next(new Error("Role-change transaction rollback failed."));
+        return sendError(res, 404, "Pengguna tidak ditemukan.");
+      }
+      const previousRole = target.rows[0].role;
+      const newRole = req.body.role;
+      if (previousRole === "admin" && newRole !== "admin") {
+        const admins = await client.query("SELECT COUNT(*)::int AS total FROM users u JOIN roles r ON r.id=u.role_id WHERE r.name='admin'");
+        if (admins.rows[0].total <= 1) {
+          rollbackFailed = await rollbackTransaction(client, logger, "change-user-role");
+          if (rollbackFailed) return next(new Error("Role-change transaction rollback failed."));
+          return sendError(res, 409, "Role admin terakhir tidak dapat diturunkan.");
+        }
+      }
+      let revokedSessions = 0;
+      if (previousRole !== newRole) {
+        await client.query("UPDATE users SET role_id=(SELECT id FROM roles WHERE name=$1), updated_at=clock_timestamp() WHERE id=$2", [newRole, req.params.userId]);
+        const revoked = await client.query("UPDATE user_sessions SET revoked_at=clock_timestamp() WHERE user_id=$1 AND revoked_at IS NULL", [req.params.userId]);
+        revokedSessions = revoked.rowCount;
+        await client.query("INSERT INTO admin_role_change_audit (actor_user_id,target_user_id,previous_role,new_role,affected_sessions) VALUES ($1,$2,$3,$4,$5)", [req.user.id, req.params.userId, previousRole, newRole, revokedSessions]);
+      }
+      await client.query("COMMIT");
+      return sendSuccess(res, 200, previousRole === newRole ? "Role pengguna tidak berubah." : "Role pengguna diperbarui dan sesi aktifnya dicabut.", { userId: req.params.userId, previousRole, role: newRole, revokedSessions });
+    } catch (error) {
+      if (client) rollbackFailed = await rollbackTransaction(client, logger, "change-user-role", error);
+      return next(error);
+    } finally { if (client) releaseTransactionClient(client, rollbackFailed); }
+  });
 
   router.get(
     "/dashboard",
@@ -84,7 +208,8 @@ export function createAdminRouter({ pool = defaultPool, logger = console } = {})
           SELECT
             (SELECT COUNT(*)::bigint FROM users) AS total_users,
             (SELECT COUNT(*)::bigint FROM concerts) AS total_concerts,
-            (SELECT COUNT(*)::bigint FROM concerts WHERE archived_at IS NULL) AS active_concerts,
+            (SELECT COUNT(*)::bigint FROM concerts WHERE archived_at IS NULL AND cancelled_at IS NULL) AS active_concerts,
+            (SELECT COUNT(*)::bigint FROM concerts WHERE cancelled_at IS NOT NULL) AS cancelled_concerts,
             (SELECT COUNT(*)::bigint FROM concerts WHERE archived_at IS NOT NULL) AS archived_concerts,
             (SELECT COUNT(*)::bigint FROM bookings) AS total_bookings,
             (SELECT COUNT(*)::bigint FROM bookings WHERE status='pending') AS pending_bookings,
@@ -109,6 +234,7 @@ export function createAdminRouter({ pool = defaultPool, logger = console } = {})
             totalUsers: summary.total_users,
             totalConcerts: summary.total_concerts,
             activeConcerts: summary.active_concerts,
+            cancelledConcerts: summary.cancelled_concerts,
             archivedConcerts: summary.archived_concerts,
             totalBookings: summary.total_bookings,
             pendingBookings: summary.pending_bookings,
@@ -124,7 +250,7 @@ export function createAdminRouter({ pool = defaultPool, logger = console } = {})
             issuedTickets: summary.issued_tickets,
             usedTickets: summary.used_tickets,
             definitions: {
-              activeConcerts: "Konser dengan archived_at NULL.",
+              activeConcerts: "Konser dengan archived_at NULL dan cancelled_at NULL.",
               paidAmount: "Jumlah amount pembayaran berstatus paid saja.",
               issuedTickets: "Semua row digital_tickets; status used tetap dihitung sebagai pernah diterbitkan.",
             },
@@ -137,11 +263,6 @@ export function createAdminRouter({ pool = defaultPool, logger = console } = {})
   );
 
   // Fase 05: Concert management.
-  const concertAdminGuard = [
-    requireAuth,
-    requireRole(ROLES.ADMIN),
-  ];
-
   router.get("/orders", ...reportGuard, async (req, res, next) => {
     const pagination = parsePagination(req.query);
     const range = parseDateRange(req.query);
@@ -179,9 +300,19 @@ export function createAdminRouter({ pool = defaultPool, logger = console } = {})
     const code = String(req.params.bookingCode || "").toUpperCase();
     if (!/^KK-[A-F0-9]{16}$/.test(code)) return sendError(res, 400, "Format kode pesanan tidak valid.");
     try {
-      const result = await pool.query(`SELECT b.booking_code AS "bookingCode", b.customer_name AS "customerName", b.customer_email AS "customerEmail", b.quantity, b.unit_price::double precision AS "unitPrice", b.total_price::double precision AS "totalPrice", b.status AS "bookingStatus", p.status AS "paymentStatus", p.amount::double precision AS amount, p.payment_method AS "paymentMethod", p.expires_at AS "expiresAt", p.paid_at AS "paidAt", p.failed_at AS "failedAt", p.expired_at AS "expiredAt", b.created_at AS "createdAt", tc.name AS "ticketCategory", c.title AS "concertTitle" FROM bookings b JOIN payments p ON p.booking_id=b.id JOIN ticket_categories tc ON tc.id=b.ticket_category_id JOIN concerts c ON c.id=tc.concert_id WHERE b.booking_code=$1`, [code]);
+      const result = await pool.query(`SELECT b.booking_code AS "bookingCode", b.customer_name AS "customerName", b.customer_email AS "customerEmail", b.quantity, b.unit_price::double precision AS "unitPrice", b.total_price::double precision AS "totalPrice", b.status AS "bookingStatus", p.status AS "paymentStatus", p.amount::double precision AS amount, p.payment_method AS "paymentMethod", p.expires_at AS "expiresAt", p.paid_at AS "paidAt", p.failed_at AS "failedAt", p.expired_at AS "expiredAt", b.created_at AS "createdAt", tc.name AS "ticketCategory", c.title AS "concertTitle", c.cancelled_at AS "concertCancelledAt", c.cancellation_reason AS "cancellationReason", COALESCE((SELECT json_agg(json_build_object('ticketCode',t.ticket_code,'ticketNumber',t.ticket_number,'status',t.status,'issuedAt',t.issued_at,'usedAt',t.used_at,'validatorName',u.name) ORDER BY t.ticket_number) FROM digital_tickets t LEFT JOIN users u ON u.id=t.used_by WHERE t.booking_id=b.id),'[]'::json) AS tickets FROM bookings b JOIN payments p ON p.booking_id=b.id JOIN ticket_categories tc ON tc.id=b.ticket_category_id JOIN concerts c ON c.id=tc.concert_id WHERE b.booking_code=$1`, [code]);
       if (!result.rowCount) return sendError(res, 404, "Pesanan tidak ditemukan.");
       return sendSuccess(res, 200, "Detail pesanan berhasil dimuat.", result.rows[0]);
+    } catch (error) { return next(error); }
+  });
+
+  router.get("/payments/:bookingCode/history", ...reportGuard, async (req, res, next) => {
+    const code = String(req.params.bookingCode || "").toUpperCase();
+    if (!/^KK-[A-F0-9]{16}$/.test(code)) return sendError(res, 400, "Format kode pesanan tidak valid.");
+    try {
+      const result = await pool.query(`SELECT b.booking_code, h.previous_status AS "previousStatus", h.new_status AS "newStatus", h.changed_at AS "changedAt" FROM bookings b JOIN payments p ON p.booking_id=b.id LEFT JOIN payment_status_history h ON h.payment_id=p.id WHERE b.booking_code=$1 ORDER BY h.changed_at ASC NULLS FIRST,h.id ASC`, [code]);
+      if (!result.rowCount) return sendError(res, 404, "Pembayaran tidak ditemukan.");
+      return sendSuccess(res, 200, "Histori perubahan status pembayaran berhasil dimuat.", { bookingCode: code, events: result.rows.filter((row) => row.newStatus), availableSince: "Pencatatan dimulai setelah migrasi histori pembayaran diterapkan; histori sebelumnya tidak direka ulang." });
     } catch (error) { return next(error); }
   });
 
@@ -286,7 +417,41 @@ export function createAdminRouter({ pool = defaultPool, logger = console } = {})
       const pageValues = [...values, pagination.limit, pagination.offset];
       const result = await pool.query(`SELECT p.id::text AS "paymentId", b.booking_code AS "bookingCode", p.status AS "paymentStatus", p.amount::text AS amount, p.payment_method AS "paymentMethod", p.created_at AS "createdAt", p.paid_at AS "paidAt", p.expires_at AS "expiresAt", c.title AS "concertTitle" FROM payments p JOIN bookings b ON b.id=p.booking_id JOIN ticket_categories tc ON tc.id=b.ticket_category_id JOIN concerts c ON c.id=tc.concert_id ${where} ORDER BY ${orderBy} ${direction.toUpperCase()} NULLS LAST, p.id DESC LIMIT $${values.length + 1} OFFSET $${values.length + 2}`, pageValues);
       const total = Number(count.rows[0].total);
-      return sendSuccess(res, 200, "Laporan pembayaran berhasil dimuat.", { payments: result.rows, total, page: pagination.page, limit: pagination.limit, totalPages: Math.ceil(total / pagination.limit), period: range, timezone: "UTC", revenueDefinition: "Hanya amount dengan payment status paid yang merupakan pendapatan simulasi." });
+      return sendSuccess(res, 200, "Laporan pembayaran berhasil dimuat.", { payments: result.rows, total, page: pagination.page, limit: pagination.limit, totalPages: Math.ceil(total / pagination.limit), period: range, timezone: "UTC", revenueDefinition: "Hanya amount berstatus paid yang dihitung; nilai ini bukan settlement payment gateway." });
+    } catch (error) { return next(error); }
+  });
+
+  router.get("/exports/orders.csv", ...reportGuard, async (req, res, next) => {
+    const filters = validateReportFilters(req.query, { statuses: ["pending", "confirmed", "cancelled"], dateColumn: { status: "b.status", date: "b.created_at" } });
+    if (!filters) return sendError(res, 400, "Filter export pesanan tidak valid.");
+    try {
+      const result = await pool.query(`SELECT b.booking_code AS "bookingCode", b.status AS "bookingStatus", c.title AS "concertTitle", tc.name AS "ticketCategory", b.quantity, b.total_price::text AS "totalPrice", p.status AS "paymentStatus", b.created_at AS "createdAt" FROM bookings b LEFT JOIN payments p ON p.booking_id=b.id JOIN ticket_categories tc ON tc.id=b.ticket_category_id JOIN concerts c ON c.id=tc.concert_id ${filters.where} ORDER BY b.created_at DESC,b.id DESC LIMIT 10001`, filters.values);
+      const limited = result.rows.slice(0, 10000);
+      if (result.rows.length > 10000) res.setHeader("X-Export-Truncated", "true");
+      return sendCsv(res, "konserkita-orders.csv", ["booking_code", "booking_status", "concert", "ticket_category", "quantity", "total_amount", "payment_status", "created_at_utc"], limited.map((row) => [row.bookingCode, row.bookingStatus, row.concertTitle, row.ticketCategory, row.quantity, row.totalPrice, row.paymentStatus, row.createdAt]));
+    } catch (error) { return next(error); }
+  });
+
+  router.get("/exports/payments.csv", ...reportGuard, async (req, res, next) => {
+    const filters = validateReportFilters(req.query, { statuses: ["pending", "paid", "failed", "expired"], dateColumn: { status: "p.status", date: "p.created_at" } });
+    if (!filters) return sendError(res, 400, "Filter export pembayaran tidak valid.");
+    try {
+      const result = await pool.query(`SELECT b.booking_code AS "bookingCode", c.title AS "concertTitle", p.status AS "paymentStatus", p.amount::text AS amount, p.payment_method AS "paymentMethod", p.created_at AS "createdAt", p.paid_at AS "paidAt" FROM payments p JOIN bookings b ON b.id=p.booking_id JOIN ticket_categories tc ON tc.id=b.ticket_category_id JOIN concerts c ON c.id=tc.concert_id ${filters.where} ORDER BY p.created_at DESC,p.id DESC LIMIT 10001`, filters.values);
+      const limited = result.rows.slice(0, 10000);
+      if (result.rows.length > 10000) res.setHeader("X-Export-Truncated", "true");
+      return sendCsv(res, "konserkita-payments.csv", ["booking_code", "concert", "payment_status", "amount", "method", "created_at_utc", "paid_at_utc"], limited.map((row) => [row.bookingCode, row.concertTitle, row.paymentStatus, row.amount, row.paymentMethod, row.createdAt, row.paidAt]));
+    } catch (error) { return next(error); }
+  });
+
+  router.get("/exports/concert-performance.csv", ...reportGuard, async (req, res, next) => {
+    const range = parseDateRange(req.query);
+    const days = range?.from && range?.to ? (Date.parse(`${range.to}T00:00:00Z`) - Date.parse(`${range.from}T00:00:00Z`)) / 86400000 : Infinity;
+    if (!range || !range.from || !range.to || days < 0 || days > 365) return sendError(res, 400, "Rentang export performa wajib valid dan maksimal 366 hari.");
+    try {
+      const result = await pool.query(`WITH paid AS (SELECT b.id,b.quantity,b.ticket_category_id,p.amount FROM bookings b JOIN payments p ON p.booking_id=b.id WHERE p.status='paid' AND (p.paid_at AT TIME ZONE 'UTC') >= $1::date AND (p.paid_at AT TIME ZONE 'UTC') < ($2::date + INTERVAL '1 day')), booking_totals AS (SELECT tc.concert_id,COUNT(b.id)::bigint AS bookings FROM bookings b JOIN ticket_categories tc ON tc.id=b.ticket_category_id WHERE (b.created_at AT TIME ZONE 'UTC') >= $1::date AND (b.created_at AT TIME ZONE 'UTC') < ($2::date + INTERVAL '1 day') GROUP BY tc.concert_id), paid_totals AS (SELECT tc.concert_id,COUNT(p.id)::bigint AS paid_orders,COALESCE(SUM(p.quantity),0)::bigint AS tickets_sold,COALESCE(SUM(p.amount),0)::text AS gross_sales FROM paid p JOIN ticket_categories tc ON tc.id=p.ticket_category_id GROUP BY tc.concert_id), inventory AS (SELECT concert_id,COALESCE(SUM(quota),0)::bigint AS available_quota FROM ticket_categories WHERE archived_at IS NULL GROUP BY concert_id) SELECT c.title,COALESCE(bt.bookings,0)::bigint AS bookings,COALESCE(pt.paid_orders,0)::bigint AS paid_orders,COALESCE(pt.tickets_sold,0)::bigint AS tickets_sold,COALESCE(pt.gross_sales,'0') AS gross_sales,COALESCE(i.available_quota,0)::bigint AS available_quota FROM concerts c LEFT JOIN booking_totals bt ON bt.concert_id=c.id LEFT JOIN paid_totals pt ON pt.concert_id=c.id LEFT JOIN inventory i ON i.concert_id=c.id ORDER BY c.title,c.id LIMIT 10001`, [range.from, range.to]);
+      const limited = result.rows.slice(0, 10000);
+      if (result.rows.length > 10000) res.setHeader("X-Export-Truncated", "true");
+      return sendCsv(res, "konserkita-concert-performance.csv", ["concert", "bookings_created_in_period", "paid_orders_paid_in_period", "tickets_sold_paid_in_period", "gross_sales_paid_in_period", "available_quota_current"], limited.map((row) => [row.title, row.bookings, row.paid_orders, row.tickets_sold, row.gross_sales, row.available_quota]));
     } catch (error) { return next(error); }
   });
 
@@ -378,14 +543,18 @@ export function createAdminRouter({ pool = defaultPool, logger = console } = {})
       try {
         const status = req.query.status === "archived"
           ? "archived"
+          : req.query.status === "cancelled"
+            ? "cancelled"
           : req.query.status === "all"
             ? "all"
             : "active";
 
         const condition = status === "active"
-          ? "WHERE c.archived_at IS NULL"
+          ? "WHERE c.archived_at IS NULL AND c.cancelled_at IS NULL"
           : status === "archived"
             ? "WHERE c.archived_at IS NOT NULL"
+            : status === "cancelled"
+              ? "WHERE c.cancelled_at IS NOT NULL"
             : "";
 
         const result = await pool.query(
@@ -403,6 +572,8 @@ export function createAdminRouter({ pool = defaultPool, logger = console } = {})
              c.image_url AS "imageUrl",
              c.description,
              c.archived_at AS "archivedAt",
+             c.cancelled_at AS "cancelledAt",
+             c.cancellation_reason AS "cancellationReason",
              COALESCE(
                (SELECT COUNT(*)::int FROM ticket_categories tc
                 WHERE tc.concert_id = c.id), 0
@@ -436,6 +607,8 @@ export function createAdminRouter({ pool = defaultPool, logger = console } = {})
              to_char(c.event_time, 'HH24:MI') AS "eventTime",
              c.accent, c.image_url AS "imageUrl",
              c.description, c.archived_at AS "archivedAt",
+             c.cancelled_at AS "cancelledAt",
+             c.cancellation_reason AS "cancellationReason",
              COALESCE(
                (SELECT json_agg(json_build_object(
                  'id', tc.id::text,
@@ -540,7 +713,7 @@ export function createAdminRouter({ pool = defaultPool, logger = console } = {})
                venue=$5, event_date=$6, event_time=$7,
                accent=$8, image_url=$9, description=$10,
                updated_at=NOW()
-           WHERE id=$11::bigint AND archived_at IS NULL
+           WHERE id=$11::bigint AND archived_at IS NULL AND cancelled_at IS NULL
            RETURNING id::text AS id, slug`,
           [
             data.title, data.artist, data.category, data.city,
@@ -591,6 +764,24 @@ export function createAdminRouter({ pool = defaultPool, logger = console } = {})
       }
     },
   );
+
+  router.post("/concerts/:id/cancel", ...concertAdminGuard, async (req, res, next) => {
+    if (!isValidConcertId(req.params.id)) return sendError(res, 400, "ID konser tidak valid.");
+    const reason = typeof req.body?.reason === "string" ? req.body.reason.trim() : "";
+    if (Object.keys(req.body || {}).some((key) => key !== "reason") || !reason || reason.length > 500 || /[\u0000-\u001F\u007F]/.test(reason)) {
+      return sendError(res, 400, "Alasan pembatalan wajib diisi (maksimal 500 karakter).");
+    }
+    try {
+      const result = await pool.query(
+        `UPDATE concerts SET cancelled_at=clock_timestamp(), cancellation_reason=$1, updated_at=clock_timestamp()
+         WHERE id=$2::bigint AND archived_at IS NULL AND cancelled_at IS NULL
+         RETURNING id::text AS id, cancelled_at AS "cancelledAt", cancellation_reason AS "cancellationReason"`,
+        [reason, req.params.id],
+      );
+      if (!result.rowCount) return sendError(res, 404, "Konser aktif yang belum dibatalkan tidak ditemukan.");
+      return sendSuccess(res, 200, "Konser dibatalkan. Booking, pembayaran, dan tiket yang sudah ada tetap dipertahankan.", result.rows[0]);
+    } catch (error) { return next(error); }
+  });
 
   router.post(
     "/concerts/:id/restore",
@@ -699,6 +890,7 @@ router.post(
          FROM concerts
          WHERE id = $1::bigint
            AND archived_at IS NULL
+           AND cancelled_at IS NULL
          FOR UPDATE`,
         [req.params.concertId],
       );
@@ -848,8 +1040,9 @@ router.put(
          WHERE c.id = $1::bigint
            AND tc.id = $2::bigint
            AND c.archived_at IS NULL
+           AND c.cancelled_at IS NULL
            AND tc.archived_at IS NULL
-         FOR UPDATE OF tc`,
+         FOR UPDATE OF tc, c`,
         [req.params.concertId, req.params.categoryId],
       );
 
@@ -952,7 +1145,8 @@ router.delete(
          JOIN concerts AS c ON c.id = tc.concert_id
          WHERE tc.id = $1::bigint
            AND c.archived_at IS NULL
-         FOR UPDATE OF tc`,
+           AND c.cancelled_at IS NULL
+         FOR UPDATE OF tc, c`,
         [req.params.categoryId],
       );
 
@@ -1014,7 +1208,8 @@ router.post(
          JOIN concerts AS c ON c.id = tc.concert_id
          WHERE tc.id = $1::bigint
            AND c.archived_at IS NULL
-         FOR UPDATE OF tc`,
+           AND c.cancelled_at IS NULL
+         FOR UPDATE OF tc, c`,
         [req.params.categoryId],
       );
 

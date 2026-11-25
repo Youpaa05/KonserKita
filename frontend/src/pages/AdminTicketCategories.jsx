@@ -1,4 +1,5 @@
 import { useState } from "react";
+import ConfirmDialog from "../components/ConfirmDialog";
 import {
   getAdminConcert,
   createAdminTicketCategory,
@@ -32,6 +33,8 @@ export default function AdminTicketCategories({ concertId }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const [archiveTarget, setArchiveTarget] = useState(null);
+  const [archiving, setArchiving] = useState(false);
 
   async function loadCategories() {
     setLoading(true);
@@ -139,20 +142,22 @@ export default function AdminTicketCategories({ concertId }) {
     }
   }
 
-  async function archive(category) {
-    if (!window.confirm(`Nonaktifkan kategori "${category.name}"? Riwayat booking tetap dipertahankan.`)) {
-      return;
-    }
-
+  async function archive() {
+    if (!archiveTarget) return;
+    setArchiving(true);
     setError("");
     setMessage("");
 
     try {
-      await archiveAdminTicketCategory(category.id);
+      await archiveAdminTicketCategory(archiveTarget.id);
       setMessage("Kategori berhasil dinonaktifkan.");
+      setArchiveTarget(null);
       await loadCategories();
     } catch (err) {
       setError(err.message || "Kategori gagal dinonaktifkan.");
+      setArchiveTarget(null);
+    } finally {
+      setArchiving(false);
     }
   }
 
@@ -214,7 +219,7 @@ export default function AdminTicketCategories({ concertId }) {
                       <button
                         type="button"
                         className="admin-danger-button"
-                        onClick={() => archive(category)}
+                        onClick={() => setArchiveTarget(category)}
                       >
                         Nonaktifkan
                       </button>
@@ -301,6 +306,15 @@ export default function AdminTicketCategories({ concertId }) {
           </form>
         </section>
       )}
+      <ConfirmDialog
+        open={Boolean(archiveTarget)}
+        title={`Nonaktifkan kategori “${archiveTarget?.name || "tiket ini"}”?`}
+        description="Kategori tidak lagi dapat dibeli. Riwayat booking dan data kuota tetap dipertahankan."
+        confirmLabel="Nonaktifkan kategori"
+        busy={archiving}
+        onConfirm={archive}
+        onCancel={() => setArchiveTarget(null)}
+      />
     </div>
   );
 }

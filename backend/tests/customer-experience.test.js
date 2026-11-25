@@ -30,6 +30,10 @@ function customerHarness(run, { role = "customer", authenticated = true } = {}) 
     if (query.startsWith("UPDATE users SET name=")) { if (values[0] === "evil") { const error = new Error("unique"); error.code = "23505"; throw error; } return { rowCount: 1, rows: [{ id: "12", name: values[0], email: values[1] }] }; }
     if (query.includes("COUNT(*)::int AS count FROM user_notifications")) return { rowCount: 1, rows: [{ count: 2 }] };
     if (query.includes("COUNT(*)::int AS total FROM user_notifications")) return { rowCount: 1, rows: [{ total: 1 }] };
+    if (query.startsWith("SELECT COUNT(*)::bigint AS total FROM payments p")) return { rowCount: 1, rows: [{ total: "1" }] };
+    if (query.startsWith("SELECT p.id::text AS \"paymentId\"")) return { rowCount: 1, rows: [{ paymentId: "51", bookingCode: "KK-0123456789ABCDEF", paymentStatus: "paid", amount: 200, paymentMethod: "simulation", createdAt: "2026-01-01T00:00:00Z", paidAt: "2026-01-01T00:01:00Z", failedAt: null, expiredAt: null, concertTitle: "Konser Tes", ticketCategory: "Reguler", history: [{ previousStatus: "pending", newStatus: "paid", changedAt: "2026-01-01T00:01:00Z" }] }] };
+    if (query.startsWith("SELECT COUNT(*)::bigint AS total FROM payments p")) return { rowCount: 1, rows: [{ total: "1" }] };
+    if (query.startsWith("SELECT p.id::text AS \"paymentId\"")) return { rowCount: 1, rows: [{ paymentId: "51", bookingCode: "KK-0123456789ABCDEF", paymentStatus: "paid", amount: 200, paymentMethod: "simulation", createdAt: "2026-01-01T00:00:00Z", paidAt: "2026-01-01T00:01:00Z", failedAt: null, expiredAt: null, concertTitle: "Konser Tes", ticketCategory: "Reguler", history: [{ previousStatus: "pending", newStatus: "paid", changedAt: "2026-01-01T00:01:00Z" }] }] };
     if (query.includes("FROM user_notifications") && query.startsWith("SELECT id::text")) return { rowCount: 1, rows: [{ id: "4", type: "booking_created", title: "Pesanan", message: "Menunggu pembayaran", bookingCode: "KK-0123456789ABCDEF", createdAt: "2026-01-01", readAt: null }] };
     if (query.startsWith("UPDATE user_notifications")) return values[0] === "4" && values[1] === "12" ? { rowCount: 1, rows: [{ id: values[0], readAt: "2026-01-02" }] } : { rowCount: 0, rows: [] };
     throw new Error(`Query customer test tidak dikenal: ${query}`);
@@ -106,7 +110,7 @@ test("authenticated mutations reject untrusted or missing production Origin", as
   const originalEnvironment = process.env.NODE_ENV;
   const originalFrontendUrl = process.env.FRONTEND_URL;
   process.env.NODE_ENV = "production";
-  process.env.FRONTEND_URL = "http://localhost:5173";
+  process.env.FRONTEND_URL = "https://concerts.example.test";
   try {
     const body = JSON.stringify({ name: "Nama Baru" });
     const headers = { ...authHeaders(token), "Content-Type": "application/json" };
@@ -126,7 +130,7 @@ test("authenticated mutations reject untrusted or missing production Origin", as
 
     const trusted = await fetch(`${base}/api/customer/profile`, {
       method: "PATCH",
-      headers: { ...headers, Origin: "http://localhost:5173" },
+      headers: { ...headers, Origin: "https://concerts.example.test" },
       body,
     });
     assert.equal(trusted.status, 200);
@@ -144,6 +148,21 @@ test("notifikasi dipaginasi, dimiliki customer dan dapat ditandai dibaca", async
   assert.equal((await fetch(`${base}/api/customer/notifications/5/read`, { method: "PATCH", headers: authHeaders(token) })).status, 404);
   assert.equal((await fetch(`${base}/api/customer/notifications/unread-count`, { headers: authHeaders(token) })).status, 200);
 }));
+
+test("riwayat pembayaran customer hanya membaca pembayaran miliknya dan memvalidasi pagination", async () => {
+  await customerHarness(async (base, token, calls) => {
+    const response = await fetch(`${base}/api/customer/payments/history?page=1&limit=10`, { headers: authHeaders(token) });
+    const body = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(body.data.payments[0].paymentStatus, "paid");
+    assert.equal(body.data.payments[0].history[0].newStatus, "paid");
+    assert.deepEqual(calls.find(({ query }) => query.startsWith("SELECT p.id::text AS \"paymentId\"")).values, ["12", 10, 0]);
+    assert.equal((await fetch(`${base}/api/customer/payments/history?page=1&limit=1000`, { headers: authHeaders(token) })).status, 400);
+    assert.equal((await fetch(`${base}/api/customer/payments/history?page=9007199254740991`, { headers: authHeaders(token) })).status, 400);
+  });
+  await customerHarness(async (base) => assert.equal((await fetch(`${base}/api/customer/payments/history`)).status, 401), { authenticated: false });
+  await customerHarness(async (base, token) => assert.equal((await fetch(`${base}/api/customer/payments/history`, { headers: authHeaders(token) })).status, 403), { role: "admin" });
+});
 
 test("ubah password menolak password saat ini salah dan tidak menyimpan plaintext", async () => authHarness(async (base, token, state) => {
   const headers = { ...authHeaders(token), Origin: "http://localhost:5173", "Content-Type": "application/json" };

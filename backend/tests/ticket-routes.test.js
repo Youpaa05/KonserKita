@@ -8,10 +8,10 @@ import { generateSessionToken, hashSessionToken, SESSION_COOKIE_NAME } from "../
 
 const validCode=`KK-TKT-${"C".repeat(64)}`;
 
-async function adminHarness({role="admin",authenticated=true,known=true,failUpdate=false,status="issued",bookingStatus="confirmed",paymentStatus="paid"}={},run){
+async function adminHarness({role="admin",authenticated=true,known=true,failUpdate=false,status="issued",bookingStatus="confirmed",paymentStatus="paid",concertCancelled=false}={},run){
  const token=authenticated?generateSessionToken():null;const tokenHash=token?hashSessionToken(token):null;const calls=[];
  let ticketStatus=status,usedBy=null,usedAt=null,updates=0,snapshot=null,lockTail=Promise.resolve();
- const ticket={id:"ticket-1",ticketCode:validCode,ticketNumber:1,ticketStatus,bookingCode:"KK-0123456789ABCDEF",ownerName:"Customer Test",bookingStatus,paymentStatus,ticketCategory:"Festival",concertTitle:"Konser Tes",venue:"Gedung Tes",city:"Jakarta",eventDate:"2027-01-01",eventTime:"19:00"};
+ const ticket={id:"ticket-1",ticketCode:validCode,ticketNumber:1,ticketStatus,bookingCode:"KK-0123456789ABCDEF",ownerName:"Customer Test",bookingStatus,paymentStatus,concertCancelledAt:concertCancelled?new Date("2026-01-01T00:00:00Z"):null,ticketCategory:"Festival",concertTitle:"Konser Tes",venue:"Gedung Tes",city:"Jakarta",eventDate:"2027-01-01",eventTime:"19:00"};
  const pool={async query(sql,values=[]){if(sql.includes("FROM user_sessions")){const ok=authenticated&&values[0]===tokenHash;return {rowCount:ok?1:0,rows:ok?[{id:"17",role}]:[]};}throw new Error(`Pool query tidak dikenal: ${sql}`);},async connect(){let releaseLock=null;return {async query(sql,values=[]){const q=sql.trim().replace(/\s+/g," ");calls.push(q);if(q==="BEGIN"){snapshot={ticketStatus,usedBy,usedAt,updates};return {rows:[]};}if(q==="COMMIT"){snapshot=null;releaseLock?.();releaseLock=null;return {rows:[]};}if(q==="ROLLBACK"){if(snapshot){ticketStatus=snapshot.ticketStatus;usedBy=snapshot.usedBy;usedAt=snapshot.usedAt;updates=snapshot.updates;snapshot=null;}releaseLock?.();releaseLock=null;return {rows:[]};}if(q.includes("FOR UPDATE OF t,b,p")){const prev=lockTail;let release;lockTail=new Promise(resolve=>{release=resolve;});await prev;releaseLock=release;return known&&values[0]===validCode?{rowCount:1,rows:[{...ticket,ticketStatus,usedBy,usedAt}]}:{rowCount:0,rows:[]};}if(q.startsWith("UPDATE digital_tickets")){if(failUpdate)throw new Error("simulated update failure");if(ticketStatus!=="issued")return {rowCount:0,rows:[]};ticketStatus="used";usedBy=values[1];usedAt="2026-11-19T12:00:00.000Z";updates++;return {rowCount:1,rows:[{usedAt}]};}throw new Error(`Query admin tidak dikenal: ${q}`);},release(){releaseLock?.();releaseLock=null;}};}};
  const app=express();app.use(express.json());app.use("/api/admin/tickets",createAdminTicketRouter({pool}));app.use((error,_req,res,_next)=>res.status(500).json({success:false,message:"internal"}));
  const server=createServer(app);await new Promise((resolve,reject)=>{server.once("error",reject);server.listen(0,"127.0.0.1",resolve);});
@@ -33,6 +33,10 @@ test("admin memvalidasi tiket eligible dan menandainya used",async()=>adminHarne
 
 test("kode tiket invalid ditolak",async()=>adminHarness({},async(base,db)=>{
  let response=await fetch(`${base}/api/admin/tickets/validate`,{method:"POST",headers:{Cookie:db.cookie,"Content-Type":"application/json"},body:JSON.stringify({ticketCode:"bad"})});assert.equal(response.status,400);
+}));
+
+test("tiket konser yang dibatalkan ditolak dan tidak ditandai used",async()=>adminHarness({concertCancelled:true},async(base,db)=>{
+ const response=await fetch(`${base}/api/admin/tickets/validate`,{method:"POST",headers:{Cookie:db.cookie,"Content-Type":"application/json"},body:JSON.stringify({ticketCode:validCode})});assert.equal(response.status,409);assert.equal(db.ticketStatus,"issued");assert.equal(db.updates,0);assert.ok(db.calls.includes("ROLLBACK"));
 }));
 
 test("admin menolak penggunaan ulang tiket",async()=>adminHarness({status:"used"},async(base,db)=>{

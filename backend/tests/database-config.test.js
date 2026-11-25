@@ -1,10 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildDatabasePoolConfig } from "../src/config/database.js";
+import {
+  buildDatabasePoolConfig,
+  resolveDatabaseSsl,
+} from "../src/config/database.js";
 
 const credentials = {
-  DB_NAME: "konserkita",
-  DB_USER: "konserkita_app",
+  DB_NAME: "konserkita_db",
+  DB_USER: "postgres",
   DB_PASSWORD: "test-password",
 };
 
@@ -13,10 +16,101 @@ test("DB_* tetap mendukung PostgreSQL lokal tanpa TLS pada development", () => {
     ...credentials,
     NODE_ENV: "development",
   });
-
   assert.equal(config.host, "localhost");
   assert.equal(config.port, 5432);
   assert.equal(config.ssl, false);
+});
+
+test("development menerima DATABASE_URL loopback yang sesuai dengan DB_NAME", () => {
+  const config = buildDatabasePoolConfig({
+    DB_USER: "postgres",
+    DB_HOST: "localhost",
+    DB_PORT: "5432",
+    DB_NAME: "konserkita_db",
+    DATABASE_URL: "postgresql://postgres@localhost:5432/konserkita_db",
+    NODE_ENV: "development",
+  });
+
+  assert.equal(config.host, "localhost");
+  assert.equal(Number(config.port), 5432);
+  assert.equal(config.database, "konserkita_db");
+  assert.equal(config.ssl, false);
+});
+
+test("development menolak DATABASE_URL yang bukan target lokal KonserKita", () => {
+  assert.throws(
+    () => buildDatabasePoolConfig({
+      ...credentials,
+      DB_NAME: "konserkita_db",
+      DATABASE_URL: "postgresql://app@ep-example.neon.tech/konserkita",
+      NODE_ENV: "development",
+    }),
+    /must match the configured local KonserKita database/,
+  );
+
+  assert.throws(
+    () => buildDatabasePoolConfig({
+      DB_USER: "postgres",
+      DB_NAME: "konserkita_db",
+      DATABASE_URL: "postgresql://app@localhost:55432/konserkita_batch08",
+      NODE_ENV: "development",
+    }),
+    /must match the configured local KonserKita database/,
+  );
+
+  assert.throws(
+    () => buildDatabasePoolConfig({
+      ...credentials,
+      DB_USER: "other",
+      DB_NAME: "konserkita_db",
+      DATABASE_URL: "postgresql://other@localhost:5432/konserkita_db",
+      NODE_ENV: "development",
+    }),
+    /must match the configured local KonserKita database/,
+  );
+
+  assert.throws(
+    () => buildDatabasePoolConfig({
+      ...credentials,
+      DB_HOST: "localhost",
+      DB_PORT: "55432",
+      DB_NAME: "konserkita_db",
+      NODE_ENV: "development",
+    }),
+    /must be the configured local KonserKita database/,
+  );
+
+  assert.throws(
+    () => buildDatabasePoolConfig({
+      DB_HOST: "localhost",
+      DB_PORT: "5432",
+      DB_NAME: "konserkita_db",
+      DB_PASSWORD: "test-password",
+      NODE_ENV: "development",
+    }),
+    /must be the configured local KonserKita database/,
+  );
+});
+
+test("test environment juga menolak DATABASE_URL remote", () => {
+  assert.throws(
+    () => buildDatabasePoolConfig({
+      DATABASE_URL: "postgresql://app@db.example.test/konserkita_test",
+      NODE_ENV: "test",
+    }),
+    /Test DATABASE_URL must use a local database host/,
+  );
+});
+
+test("production DATABASE_URL tetap menjadi pilihan eksplisit dan memakai TLS", () => {
+  const config = buildDatabasePoolConfig({
+    DATABASE_URL: "postgresql://app@db.example.test/konserkita",
+    NODE_ENV: "production",
+  });
+
+  assert.equal(config.host, "db.example.test");
+  assert.equal(config.database, "konserkita");
+  assert.deepEqual(config.ssl, { rejectUnauthorized: true });
 });
 
 test("DB_* remote menggunakan TLS dengan validasi sertifikat", () => {
@@ -52,12 +146,7 @@ test("DATABASE_URL tetap memverifikasi sertifikat walau URL meminta no-verify", 
 
 test("TLS tidak dapat dimatikan untuk host remote pada development", () => {
   assert.throws(
-    () => buildDatabasePoolConfig({
-      ...credentials,
-      DB_HOST: "db.example.test",
-      DATABASE_SSL: "false",
-      NODE_ENV: "development",
-    }),
+    () => resolveDatabaseSsl("development", "false", undefined, "db.example.test"),
     /only allowed for a local development database/,
   );
 });

@@ -1,12 +1,12 @@
 # KonserKita
 
-KonserKita adalah aplikasi web pemesanan tiket konser untuk kebutuhan demonstrasi dan portofolio. Customer dapat mencari konser, membuat booking sebagai guest atau customer, mencoba pembayaran simulasi, dan mengakses tiket digital. Administrator dapat mengelola konser, melihat laporan, serta memvalidasi tiket.
+KonserKita adalah platform web untuk menemukan acara, membuat pesanan, dan mengelola tiket konser. Customer dapat menelusuri konser, membuat pesanan sebagai guest atau customer, melihat status pesanan, serta mengelola profil dan favorit. Administrator dapat mengelola konser, pesanan, pengguna, laporan, dan validasi kode tiket.
 
-> Konser, booking, pembayaran, dan tiket dalam aplikasi ini adalah simulasi. Tidak ada payment gateway atau penjualan tiket sungguhan.
+> Pembayaran belum terhubung ke payment gateway dan aplikasi tidak memproses dana. Status payment yang tersimpan bukan bukti penerimaan dana; kode tiket KonserKita bukan pengganti tiket resmi penyelenggara.
 
 ## Fitur utama
 
-**Customer:** katalog dengan pencarian dan filter, registrasi/login, booking, pembayaran simulasi dengan batas waktu, riwayat pesanan, e-ticket ber-QR, favorit, profil, perubahan password, dan notifikasi.
+**Customer:** katalog dengan pencarian dan filter, registrasi/login, pemesanan, status pesanan, riwayat pesanan, kode tiket ber-QR jika tersedia, favorit, profil, perubahan password, dan notifikasi. Pesanan tidak dapat diselesaikan secara online sebelum payment gateway tersedia.
 
 **Admin:** manajemen konser dan kategori tiket, ringkasan statistik database, laporan pesanan dan payment, serta pemeriksaan QR/kode tiket satu kali pakai.
 
@@ -15,7 +15,7 @@ KonserKita adalah aplikasi web pemesanan tiket konser untuk kebutuhan demonstras
 - Frontend: React 19, React Router, Vite, CSS.
 - Backend: Node.js (ES modules), Express 5, PostgreSQL melalui `pg`.
 - Authentication: password hashing `scrypt`, session token acak pada cookie HttpOnly; hanya hash token sesi yang disimpan di PostgreSQL.
-- Payment/ticket: payment simulation; kode tiket acak dan QR, dengan validasi final di backend.
+- Payment/ticket: status pembayaran berasal dari database; tidak ada payment gateway. Kode tiket acak dapat diverifikasi oleh backend aplikasi.
 - Testing: Node.js Test Runner, backend dan frontend.
 
 Frontend mengirim request `/api` dengan cookie. Saat development Vite meneruskan `/api` ke backend lokal. Production API origin dapat diatur melalui `VITE_API_BASE_URL`. Backend memeriksa sesi dan role untuk endpoint privat; ownership data diperiksa di backend.
@@ -24,7 +24,7 @@ Frontend mengirim request `/api` dengan cookie. Saat development Vite meneruskan
 
 ```text
 backend/
-  database/migrations/   Migration SQL bernomor 001–009
+  database/migrations/   Migration SQL bernomor 001–011
   scripts/migrate.js     Runner migration dengan pemeriksaan target database
   src/routes/            API concert, auth, booking, payment, customer, admin, ticket
   src/middleware/        Auth, authorization, dan rate limiting
@@ -80,13 +80,15 @@ Migration berurutan yang tersedia:
 2. `002_create_user_sessions.sql` — sesi.
 3. `003_concert_management.sql` — pengarsipan konser.
 4. `004_ticket_category_inventory.sql` — inventory dan pengarsipan kategori tiket.
-5. `005_create_payments.sql` — payment simulasi.
+5. `005_create_payments.sql` — pencatatan status dan nominal payment; bukan integrasi payment gateway.
 6. `006_create_digital_tickets.sql` — tiket digital.
 7. `007_customer_experience.sql` — favorit dan notifikasi.
 8. `008_rate_limits_and_ticket_backfill.sql` — counter shared rate limit PostgreSQL dan backfill awal tiket.
 9. `009_reconcile_digital_tickets.sql` — melengkapi nomor tiket yang hilang dan memvalidasi jumlah/rentang tiket booking eligible.
+10. `010_concert_cancellation.sql` — status pembatalan konser tanpa menghapus relasi transaksi.
+11. `011_admin_operations_history.sql` — histori transisi payment mendatang dan audit perubahan role admin.
 
-Ketersediaan file tidak membuktikan migration telah diterapkan. Status lokal 001–007 pernah dilaporkan diterapkan tetapi belum diverifikasi saat ini; migration 008 dan 009 belum dijalankan atau diuji terhadap PostgreSQL nyata. Runner lokal dijalankan dari root dengan `npm --prefix backend run db:migrate`; perintah ini mengubah schema dan hanya mengizinkan target lokal tertentu. Jangan menjalankannya sebelum identitas database lokal dan dampak migration dipastikan. `backend/database/schema.sql` adalah bootstrap untuk tabel dasar; jangan menggabungkannya tanpa meninjau urutan migration. Lihat [setup database](docs/database-setup.md) untuk prasyarat, batas runner, dan rencana validasi staging.
+Ketersediaan file tidak membuktikan migration telah diterapkan. Riwayat target perlu diverifikasi read-only. Runner lokal dijalankan dari root dengan `npm --prefix backend run db:migrate`; perintah ini mengubah schema dan hanya mengizinkan target lokal tertentu. Jangan menjalankannya sebelum identitas database lokal dan dampak migration dipastikan. `backend/database/schema.sql` adalah bootstrap untuk tabel dasar; jangan menggabungkannya tanpa meninjau urutan migration. Lihat [setup database](docs/database-setup.md) untuk prasyarat, batas runner, dan rencana validasi staging.
 
 ## Testing dan pemeriksaan kualitas
 
@@ -97,13 +99,13 @@ npm --prefix frontend run lint
 npm --prefix frontend run build
 ```
 
-Test backend transaksi menggunakan test harness/mock dan tidak membuktikan integrasi PostgreSQL nyata. Belum ada browser E2E tooling di dependency project. Lihat [checklist QA manual](docs/manual-qa-checklist.md) untuk alur yang memerlukan browser dan database test aman.
+Test backend transaksi menggunakan test harness/mock dan tidak membuktikan integrasi PostgreSQL nyata. Playwright dan acceptance E2E tersedia melalui `npm --prefix frontend run test:e2e`, tetapi eksekusinya belum diverifikasi sebagai bagian dari release dan memerlukan aplikasi serta data acceptance yang sudah disiapkan. Lihat [checklist QA manual](docs/manual-qa-checklist.md) untuk alur yang memerlukan browser dan database test aman.
 
 ## Dokumentasi
 
 - [Setup database](docs/database-setup.md)
 - [Development lokal](docs/local-development.md)
-- [Skenario demo](docs/demo-scenario.md)
+- [Alur penggunaan](docs/demo-scenario.md)
 - [Checklist QA manual](docs/manual-qa-checklist.md)
 - [Deployment readiness](docs/deployment-readiness.md)
 - [Materi portofolio](docs/portfolio.md)

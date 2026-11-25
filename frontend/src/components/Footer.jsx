@@ -9,11 +9,12 @@ export default function Footer() {
           <span>Konser<span className="brand-light">Kita</span></span>
         </Link>
         <p>Temukan momen, rasakan musik, buat cerita.</p>
-        <small>© {new Date().getFullYear()} KonserKita. Proyek akademik.</small>
+        <small>© {new Date().getFullYear()} KonserKita · Platform pemesanan tiket konser.</small>
       </div>
       <div className="container simulation-note">
-        Konser dan harga pada situs ini adalah data simulasi. Pemesanan dan pembayaran
-        belum mewakili transaksi tiket sungguhan.
+        Informasi acara dan harga mengikuti data yang tersedia di platform. Pembayaran
+        belum terhubung ke payment gateway dan tidak memproses transaksi nyata. Kode tiket
+        KonserKita bukan pengganti tiket resmi dari penyelenggara.
       </div>
     </footer>
   );

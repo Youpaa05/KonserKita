@@ -32,6 +32,7 @@ const bookings = [
     customer_email: "one@example.com",
     concert_title: "Konser Pengujian",
     concert_slug: "konser-pengujian",
+    concertCancelledAt: null,
     category_name: "Festival",
     quantity: 2,
     unit_price: "350000.00",
@@ -143,6 +144,7 @@ test("customer hanya menerima riwayat booking miliknya", async () => {
     const serialized = JSON.stringify(body);
     assert.match(serialized, /KK-0123456789ABCDEF/);
     assert.doesNotMatch(serialized, /two@example\.com/);
+    assert.equal(body.data.bookings[0].concertCancelledAt, null);
   });
 });
 

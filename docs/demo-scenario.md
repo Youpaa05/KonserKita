@@ -1,6 +1,6 @@
 # Skenario demo KonserKita
 
-Panduan ini menunjukkan alur aplikasi untuk demo lokal/portfolio. Semua booking dan pembayaran adalah simulasi. Jangan memakai production atau database yang datanya perlu dipertahankan.
+Panduan ini menunjukkan pemeriksaan aplikasi pada lingkungan lokal terisolasi. Jangan memakai production atau database yang datanya perlu dipertahankan.
 
 ## Persiapan aman
 
@@ -16,7 +16,7 @@ Panduan ini menunjukkan alur aplikasi untuk demo lokal/portfolio. Semua booking 
 3. Daftar/login dengan akun test, lalu coba favorit dan profil jika sesuai demo.
 4. Pilih kategori dan jumlah tiket yang tersedia, lalu buat booking pada database test.
 5. Catat kode booking secara lokal untuk demo singkat saja. Jangan unggah kode aktif ke portfolio.
-6. Buka pembayaran simulasi dan pilih success. Pastikan halaman hasil menunjukkan status database, booking confirmed, dan tiket digital.
+6. Buka halaman pembayaran. Secara default simulasi dinonaktifkan dan percobaan pembayaran ditolak tanpa mengubah booking/payment atau menerbitkan tiket. Untuk demo lokal saja, simulasi dapat diaktifkan secara eksplisit dengan `PAYMENT_SIMULATION_ENABLED=true` pada `NODE_ENV=development`; hasilnya tetap simulasi tanpa dana nyata. Pastikan memakai database test terisolasi sebelum mengaktifkannya.
 7. Buka tiket, tunjukkan QR. QR memuat kode tiket acak; hanya backend yang memutuskan tiket valid.
 
 ## Alur admin

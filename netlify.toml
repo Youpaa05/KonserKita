@@ -3,6 +3,9 @@
   command = "npm --prefix backend ci && npm --prefix frontend ci --include=dev && npm --prefix frontend run build"
   publish = "frontend/dist"
 
+[build.environment]
+  NODE_VERSION = "22"
+
 [functions]
   directory = "backend/netlify/functions"
   node_bundler = "esbuild"

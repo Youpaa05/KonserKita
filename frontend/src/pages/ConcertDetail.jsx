@@ -1,5 +1,5 @@
 ﻿
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import Loading from "../components/Loading";
 import {
@@ -8,6 +8,7 @@ import {
   getTicketCategories,
 } from "../services/api";
 import { formatDate, formatPrice } from "../data/concerts";
+import { getConcertLineup } from "../data/lineup";
 
 export default function ConcertDetail() {
   const { id } = useParams();
@@ -21,6 +22,9 @@ export default function ConcertDetail() {
   const [bookingError, setBookingError] = useState("");
   const [bookingLoading, setBookingLoading] = useState(false);
   const [bookingResult, setBookingResult] = useState(null);
+  const [posterFailed, setPosterFailed] = useState(false);
+  const [copyMessage, setCopyMessage] = useState("");
+  const bookingRequestRef = useRef(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -31,6 +35,8 @@ export default function ConcertDetail() {
       setConcert(null);
       setCategories([]);
       setSelectedCategoryId("");
+      setPosterFailed(false);
+      setCopyMessage("");
 
       try {
         const [concertData, categoryData] = await Promise.all([
@@ -78,6 +84,7 @@ export default function ConcertDetail() {
     if (!selectedCategory || !quantityValid) return null;
     return Number(selectedCategory.price) * quantityNumber;
   }, [selectedCategory, quantityValid, quantityNumber]);
+  const lineup = getConcertLineup(concert);
 
   async function handleBooking(event) {
     event.preventDefault();
@@ -116,14 +123,27 @@ export default function ConcertDetail() {
     setBookingLoading(true);
 
     try {
-      const result = await createBooking({
+      const payload = {
         customerName,
         customerEmail,
         ticketCategoryId: selectedCategory.id,
         quantity: quantityNumber,
-      });
+      };
+      const fingerprint = JSON.stringify(payload);
+      if (bookingRequestRef.current?.fingerprint !== fingerprint) {
+        const bytes = new Uint8Array(16);
+        globalThis.crypto.getRandomValues(bytes);
+        bookingRequestRef.current = {
+          fingerprint,
+          key: [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join(""),
+        };
+      }
+      const result = await createBooking({
+        ...payload,
+      }, { idempotencyKey: bookingRequestRef.current.key });
 
       setBookingResult(result);
+      bookingRequestRef.current = null;
       setCategories((current) =>
         current.map((category) =>
           category.id === selectedCategory.id
@@ -135,6 +155,20 @@ export default function ConcertDetail() {
       setBookingError(requestError.message);
     } finally {
       setBookingLoading(false);
+    }
+  }
+
+  async function copyBookingCode() {
+    setCopyMessage("");
+    if (!navigator.clipboard?.writeText) {
+      setCopyMessage("Clipboard tidak tersedia di browser ini. Pilih dan salin kode pesanan secara manual.");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(bookingResult.bookingCode);
+      setCopyMessage("Kode pesanan berhasil disalin.");
+    } catch {
+      setCopyMessage("Kode belum tersalin. Pilih dan salin kode pesanan secara manual.");
     }
   }
 
@@ -167,17 +201,27 @@ export default function ConcertDetail() {
 
         <div className="detail-layout">
           <div className={`detail-poster poster-${concert.accent || "violet"}`}>
-            <img
+            {concert.image && !posterFailed ? <img
               src={concert.image}
               alt={`Suasana ilustratif untuk ${concert.title}`}
-            />
+              onError={() => setPosterFailed(true)}
+            /> : <div className="detail-poster-fallback" aria-hidden="true"><span>{concert.category || "KONSER LIVE"}</span><strong>{concert.title}</strong></div>}
             <span className="poster-category">{concert.category}</span>
           </div>
 
           <div className="detail-copy">
-            <span className="section-kicker">DETAIL ACARA · DATA SIMULASI</span>
+            <span className="section-kicker">DETAIL ACARA</span>
             <h1>{concert.title}</h1>
-            <p className="detail-artist">{concert.artist}</p>
+            {lineup.length > 1 ? (
+              <div className="detail-lineup">
+                <span className="section-kicker">LINEUP</span>
+                <ul>
+                  {lineup.map((performer) => <li key={performer}>{performer}</li>)}
+                </ul>
+              </div>
+            ) : (
+              <p className="detail-artist">{lineup[0] || concert.artist}</p>
+            )}
             <p className="detail-description">{concert.description}</p>
 
             <div className="detail-facts">
@@ -197,14 +241,15 @@ export default function ConcertDetail() {
             </div>
 
             <p className="detail-note">
-              Harga, acara, dan pembayaran merupakan simulasi untuk demo.
+              Informasi acara dan harga mengikuti data yang tersedia. Pembayaran belum
+              terhubung ke payment gateway dan tidak memproses transaksi nyata.
               Tidak ada pembayaran uang sungguhan.
             </p>
 
             {bookingResult ? (
               <div className="booking-result" role="status">
                 <h2>Pesanan berhasil dibuat</h2>
-                <p>Pesanan menunggu pembayaran simulasi.</p>
+                <p>Pesanan menunggu penyelesaian transaksi.</p>
                 <p>
                   Kode pesanan:{" "}
                   <strong>{bookingResult.bookingCode}</strong>
@@ -217,17 +262,16 @@ export default function ConcertDetail() {
                 </p>
                 <p>Status: {bookingResult.status}</p>
                 <Link className="button button-primary" to={`/payments/${bookingResult.bookingCode}`}>
-                  Lanjutkan pembayaran simulasi
+                  Lihat informasi pembayaran
                 </Link>
                 <button
                   className="button button-ghost"
                   type="button"
-                  onClick={() =>
-                    navigator.clipboard?.writeText(bookingResult.bookingCode)
-                  }
+                  onClick={copyBookingCode}
                 >
                   Salin kode pesanan
                 </button>
+                {copyMessage && <p className="copy-feedback" role="status">{copyMessage}</p>}
                 <Link className="button button-primary" to="/booking-status">
                   Cek status pesanan
                 </Link>
@@ -244,7 +288,7 @@ export default function ConcertDetail() {
               </div>
             ) : (
               <form className="booking-form" onSubmit={handleBooking}>
-                <h2>Pesan tiket simulasi</h2>
+                <h2>Pilih kategori tiket</h2>
 
                 <label className="booking-field">
                   Kategori tiket
@@ -339,7 +383,7 @@ export default function ConcertDetail() {
                     categories.length === 0
                   }
                 >
-                  {bookingLoading ? "Memproses pesanan..." : "Buat pesanan simulasi"}
+                  {bookingLoading ? "Memproses pesanan..." : "Buat pesanan"}
                 </button>
                 <p className="detail-note">
                   Pembuatan pesanan mengurangi kuota tiket. Pembayaran tidak

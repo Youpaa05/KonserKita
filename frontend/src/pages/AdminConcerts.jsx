@@ -1,7 +1,9 @@
 import AdminTicketCategories from "./AdminTicketCategories";
+import ConfirmDialog from "../components/ConfirmDialog";
 import { useCallback, useEffect, useState } from "react";
 import {
   archiveAdminConcert,
+  cancelAdminConcert,
   createAdminConcert,
   getAdminConcert,
   getAdminConcerts,
@@ -34,6 +36,11 @@ export default function AdminConcerts() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const [archiveTarget, setArchiveTarget] = useState(null);
+  const [archiving, setArchiving] = useState(false);
+  const [cancelTarget, setCancelTarget] = useState(null);
+  const [cancelReason, setCancelReason] = useState("");
+  const [cancelling, setCancelling] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -144,16 +151,21 @@ export default function AdminConcerts() {
     }
   }
 
-  async function archive(id) {
-    if (!window.confirm("Arsipkan konser ini? Riwayat booking akan tetap dipertahankan.")) return;
+  async function archive() {
+    if (!archiveTarget) return;
+    setArchiving(true);
     setError("");
     setMessage("");
     try {
-      await archiveAdminConcert(id);
+      await archiveAdminConcert(archiveTarget.id);
       setMessage("Konser berhasil diarsipkan.");
+      setArchiveTarget(null);
       await load();
     } catch (err) {
       setError(err.message || "Konser gagal diarsipkan.");
+      setArchiveTarget(null);
+    } finally {
+      setArchiving(false);
     }
   }
 
@@ -167,6 +179,17 @@ export default function AdminConcerts() {
     } catch (err) {
       setError(err.message || "Konser gagal dipulihkan.");
     }
+  }
+
+  async function cancelConcert() {
+    if (!cancelTarget || !cancelReason.trim()) return;
+    setCancelling(true); setError(""); setMessage("");
+    try {
+      await cancelAdminConcert(cancelTarget.id, cancelReason.trim());
+      setMessage("Konser dibatalkan; booking, pembayaran, dan tiket lama tetap tersimpan.");
+      setCancelTarget(null); setCancelReason(""); await load();
+    } catch (err) { setError(err.message || "Konser gagal dibatalkan."); }
+    finally { setCancelling(false); }
   }
 
   return (
@@ -197,8 +220,9 @@ export default function AdminConcerts() {
           <label>Nama konser
             <input name="title" value={form.title} onChange={changeField} maxLength={200} required />
           </label>
-          <label>Artis
-            <input name="artist" value={form.artist} onChange={changeField} maxLength={200} required />
+          <label>Lineup / artis
+            <input name="artist" value={form.artist} onChange={changeField} maxLength={200} required aria-describedby="concert-lineup-hint" />
+            <small id="concert-lineup-hint">Untuk beberapa performer, pisahkan nama dengan titik koma (;). Data konser lama tetap tampil sebagai satu performer.</small>
           </label>
           <label>Kategori
             <input name="category" value={form.category} onChange={changeField} maxLength={80} required />
@@ -280,6 +304,7 @@ export default function AdminConcerts() {
           <select value={status} onChange={(event) => setStatus(event.target.value)} aria-label="Filter status konser">
             <option value="active">Aktif</option>
             <option value="archived">Diarsipkan</option>
+            <option value="cancelled">Dibatalkan</option>
             <option value="all">Semua</option>
           </select>
         </div>
@@ -306,13 +331,14 @@ export default function AdminConcerts() {
                     <td>{item.venue}<small>{item.city}</small></td>
                     <td>{item.eventDate} · {item.eventTime}</td>
                     <td>{item.categoryCount}<AdminTicketCategories concertId={item.id} /></td>
-                    <td>{item.archivedAt ? "Diarsipkan" : "Aktif"}</td>
+                    <td>{item.archivedAt ? "Diarsipkan" : item.cancelledAt ? `Dibatalkan: ${item.cancellationReason}` : "Aktif"}</td>
                     <td>
                       <div className="admin-row-actions">
                         {!item.archivedAt && (
                           <>
                             <button type="button" onClick={() => startEdit(item.id)}>Edit</button>
-                            <button type="button" className="admin-danger-button" onClick={() => archive(item.id)}>Arsipkan</button>
+                            <button type="button" className="admin-danger-button" onClick={() => { setCancelTarget(item); setCancelReason(""); }}>Batalkan</button>
+                            <button type="button" className="admin-danger-button" onClick={() => setArchiveTarget(item)}>Arsipkan</button>
                           </>
                         )}
                         {item.archivedAt && (
@@ -327,6 +353,28 @@ export default function AdminConcerts() {
           </div>
         )}
       </section>
+      <ConfirmDialog
+        open={Boolean(archiveTarget)}
+        title={`Arsipkan “${archiveTarget?.title || "konser ini"}”?`}
+        description="Konser tidak lagi tampil di katalog. Riwayat booking yang sudah ada tetap dipertahankan."
+        confirmLabel="Arsipkan konser"
+        busy={archiving}
+        onConfirm={archive}
+        onCancel={() => setArchiveTarget(null)}
+      />
+      <ConfirmDialog
+        open={Boolean(cancelTarget)}
+        title={`Batalkan “${cancelTarget?.title || "konser ini"}”?`}
+        description="Konser akan dihapus dari katalog dan booking baru dihentikan. Transaksi serta tiket yang ada tetap dipertahankan."
+        confirmLabel="Batalkan konser"
+        busy={cancelling}
+        onConfirm={cancelConcert}
+        onCancel={() => { if (!cancelling) { setCancelTarget(null); setCancelReason(""); } }}
+      >
+        <label className="admin-form-wide">Alasan pembatalan
+          <textarea required maxLength={500} value={cancelReason} onChange={(event) => setCancelReason(event.target.value)} rows={3} />
+        </label>
+      </ConfirmDialog>
     </section>
   );
 }

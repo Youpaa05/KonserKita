@@ -53,6 +53,11 @@ const concertSelect = `
     c.slug,
     c.title,
     c.artist,
+    ARRAY(
+      SELECT btrim(lineup_part.value)
+      FROM unnest(string_to_array(c.artist, ';')) AS lineup_part(value)
+      WHERE btrim(lineup_part.value) <> ''
+    ) AS lineup,
     c.category,
     c.city,
     c.venue,
@@ -104,7 +109,7 @@ export function createConcertRouter({
       );
     }
 
-    const conditions = ["c.archived_at IS NULL"];
+    const conditions = ["c.archived_at IS NULL", "c.cancelled_at IS NULL"];
     const values = [];
 
     if (q.value) {
@@ -202,11 +207,11 @@ export function createConcertRouter({
 
     const concertResult = isNumericId(idOrSlug)
       ? await pool.query(
-          "SELECT id FROM concerts WHERE id = $1::bigint AND archived_at IS NULL",
+          "SELECT id FROM concerts WHERE id = $1::bigint AND archived_at IS NULL AND cancelled_at IS NULL",
           [idOrSlug],
         )
       : await pool.query(
-          "SELECT id FROM concerts WHERE slug = $1 AND archived_at IS NULL",
+          "SELECT id FROM concerts WHERE slug = $1 AND archived_at IS NULL AND cancelled_at IS NULL",
           [idOrSlug],
         );
 
@@ -254,11 +259,11 @@ export function createConcertRouter({
 
     const result = isNumericId(idOrSlug)
       ? await pool.query(
-          `${concertSelect} WHERE c.id = $1::bigint AND c.archived_at IS NULL`,
+          `${concertSelect} WHERE c.id = $1::bigint AND c.archived_at IS NULL AND c.cancelled_at IS NULL`,
           [idOrSlug],
         )
       : await pool.query(
-          `${concertSelect} WHERE c.slug = $1 AND c.archived_at IS NULL`,
+          `${concertSelect} WHERE c.slug = $1 AND c.archived_at IS NULL AND c.cancelled_at IS NULL`,
           [idOrSlug],
         );
 

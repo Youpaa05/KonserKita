@@ -11,35 +11,22 @@ import customerTicketRouterDefault from "./routes/customerTickets.js";
 import adminTicketRouterDefault from "./routes/adminTickets.js";
 import { sendError, sendSuccess } from "./utils/apiResponse.js";
 import { resolveSessionSameSite } from "./utils/session.js";
+import {
+  normalizeOrigin,
+  resolveTrustedOrigins,
+} from "./middleware/trustedOrigin.js";
 
 export function resolveCorsOrigin(environment = process.env) {
-  const configuredOrigin = environment.FRONTEND_URL?.trim();
+  return resolveTrustedOrigins(environment)[0];
+}
 
-  if (!configuredOrigin) {
-    if (environment.NODE_ENV === "production") {
-      throw new Error("FRONTEND_URL must be set to an explicit production HTTPS origin.");
-    }
-    return "http://localhost:5173";
-  }
+export function resolveCorsOrigins(environment = process.env) {
+  return resolveTrustedOrigins(environment);
+}
 
-  let parsedOrigin;
-  try {
-    parsedOrigin = new URL(configuredOrigin);
-  } catch {
-    throw new Error("FRONTEND_URL must be a valid origin.");
-  }
-
-  if (
-    configuredOrigin.includes("*") ||
-    parsedOrigin.origin !== configuredOrigin ||
-    parsedOrigin.username ||
-    parsedOrigin.password ||
-    (environment.NODE_ENV === "production" && parsedOrigin.protocol !== "https:")
-  ) {
-    throw new Error("FRONTEND_URL must be one exact origin; production requires HTTPS.");
-  }
-
-  return configuredOrigin;
+export function isCorsOriginAllowed(origin, allowedOrigins = resolveCorsOrigins()) {
+  const normalizedOrigin = normalizeOrigin(origin);
+  return Boolean(normalizedOrigin && allowedOrigins.includes(normalizedOrigin));
 }
 
 export function createApp({
@@ -55,8 +42,9 @@ export function createApp({
   logger = console,
 } = {}) {
   resolveSessionSameSite();
-  const corsOrigin = resolveCorsOrigin();
+  const corsOrigins = resolveCorsOrigins();
   const app = express();
+  app.locals.trustedOrigins = corsOrigins;
 
   app.disable("x-powered-by");
   app.use((_req, res, next) => {
@@ -74,8 +62,16 @@ export function createApp({
 
   app.use(
     cors({
-      origin: corsOrigin,
+      origin: (origin, callback) => {
+        callback(
+          null,
+          isCorsOriginAllowed(origin, corsOrigins)
+            ? normalizeOrigin(origin)
+            : false,
+        );
+      },
       credentials: true,
+      exposedHeaders: ["Content-Disposition", "X-Export-Truncated"],
     }),
   );
 

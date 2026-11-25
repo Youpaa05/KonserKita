@@ -8,10 +8,11 @@ Dokumen ini memisahkan konfigurasi yang ada di source dari hasil pengujian dan s
 
 `netlify.toml` mengatur:
 
-- Build command: `npm --prefix backend ci && npm --prefix frontend ci && npm --prefix frontend run build`.
+- Build command: `npm --prefix backend ci && npm --prefix frontend ci --include=dev && npm --prefix frontend run build`.
 - Publish directory: `frontend/dist`.
 - Direktori Netlify Functions: `backend/netlify/functions`.
 - Bundler: esbuild; `express` dikonfigurasi sebagai external module.
+- Versi Node.js build dipatok ke major `22`; runtime Functions mengikuti versi build Netlify kecuali dioverride secara terpisah.
 - Redirect `/api/*` ke `/.netlify/functions/api/:splat`.
 - Fallback `/*` ke `/index.html` untuk SPA.
 - `backend/netlify/functions/expire-bookings.js` adalah Scheduled Function setiap menit. Ia memproses expiry dalam batch terbatas dan menggunakan konfigurasi PostgreSQL yang sama. Scheduled Function hanya berjalan pada published deploy; eksekusi production belum diverifikasi.
@@ -57,7 +58,7 @@ Atur nilai deployment melalui Netlify Environment Variables yang sesuai. Jangan 
 
 ## Migration dan PostgreSQL
 
-Bootstrap `backend/database/schema.sql` menyediakan tabel dasar `concerts`, `ticket_categories`, dan `bookings`. Migration 001–009 memperluas bootstrap tersebut:
+Bootstrap `backend/database/schema.sql` menyediakan tabel dasar `concerts`, `ticket_categories`, dan `bookings`. Migration 001–011 memperluas bootstrap tersebut:
 
 | Migration | Perubahan utama |
 |---|---|
@@ -69,14 +70,16 @@ Bootstrap `backend/database/schema.sql` menyediakan tabel dasar `concerts`, `tic
 | 007 | Favorit dan notifikasi customer. |
 | 008 | Tabel shared rate limit PostgreSQL dan backfill awal ticket untuk booking `confirmed` dengan payment `paid` yang belum memiliki nomor tiket. |
 | 009 | Mengunci booking eligible yang tiketnya kurang, melengkapi nomor yang hilang, dan memvalidasi rentang serta jumlah akhir tanpa mengubah status ticket yang sudah ada. |
+| 010 | Menambahkan status pembatalan konser tanpa menghapus booking/payment/tiket dan membatasi konsistensi alasan pembatalan. |
+| 011 | Mencatat transisi payment mendatang dan audit perubahan role admin; histori lama tidak direkonstruksi. |
 
 Migration 008 tidak diubah agar riwayat/checksum tetap utuh. Backfill awalnya memakai `ON CONFLICT DO NOTHING` tanpa target konflik dan tidak memvalidasi jumlah akhir, sehingga dapat meninggalkan tiket yang kurang atau mempertahankan nomor ekstra. Migration 009 menangani rekonsiliasi tersebut: konflik ditargetkan hanya pada `(booking_id, ticket_number)`, konflik kode tiket menggagalkan transaksi, nomor di luar `1..quantity` menghentikan migration untuk rekonsiliasi manual, dan post-validation memeriksa jumlah serta rentang nomor.
 
 Migration 009 juga menghentikan eksekusi jika booking tidak memiliki payment atau status booking/payment tidak selaras. Tidak ada status booking, payment, atau ticket yang otomatis diubah; status `used` tetap dipertahankan. Status lintas tabel yang tidak konsisten perlu ditinjau dan direkonsiliasi secara manual sebelum mencoba ulang.
 
-Source SQL tidak membuktikan data target konsisten. Migration 009 belum dijalankan atau divalidasi pada PostgreSQL nyata. Jangan menganggapnya production-ready berdasarkan static/mock tests saja.
+Source SQL tidak membuktikan data target konsisten. Migration 008–011 belum diverifikasi pada PostgreSQL target. Jangan menganggapnya production-ready berdasarkan static/mock tests saja.
 
-`backend/scripts/migrate.js` adalah runner lokal dengan target statis database `konserkita_db`, user `postgres`, port `5432`, loopback, dan read-write. Runner menolak server remote. Repository tidak menyediakan runner production untuk Neon; jangan mengubah guard lokal atau menggunakannya pada database remote.
+`backend/scripts/migrate.js` adalah runner lokal dengan target statis database `konserkita_db`, user `postgres`, port `5432`, loopback, dan read-write. Runner menolak server remote. `backend/scripts/migrate-neon.js` ditambahkan untuk target staging yang di-allowlist secara statis; ia mewajibkan direct URL dengan TLS terverifikasi dan menolak production. Runner tersebut belum dijalankan pada PostgreSQL nyata dan bukan runner production. Jangan mengubah guard atau menggunakannya untuk menargetkan production.
 
 ### Persiapan production migration (tanpa menjalankannya)
 
@@ -86,9 +89,9 @@ Migration production **belum dijalankan atau diverifikasi**. Persiapan yang masi
 2. Cocokkan riwayat migration, jika tersedia, dengan source dan checksum; tinjau asumsi bootstrap serta dampak backfill 005/008/009.
 3. Siapkan clone PostgreSQL staging yang terisolasi, dengan snapshot yang dapat dipulihkan dan tanpa traffic penulisan aplikasi selama migration.
 4. Uji pada clone: booking tanpa tiket, tiket lengkap, nomor hilang, nomor di luar kuantitas, konflik kode, status booking/payment tidak konsisten, payment non-paid, tiket `used`, dan rollback pasca-validasi. Verifikasi setiap booking eligible memiliki tepat nomor `1..quantity`.
-5. Gunakan prosedur migration yang disetujui untuk target staging. Runner repository hanya mengizinkan PostgreSQL lokal; jangan mengubah guard atau menggunakannya pada Neon.
+5. Gunakan prosedur migration yang disetujui untuk target staging. Repository menyediakan runner staging khusus dengan target endpoint yang di-allowlist; runner dan koneksi PostgreSQL nyata belum diverifikasi. Pastikan target, backup, dan persetujuan terlebih dahulu, serta jangan mengubah guard untuk mengatasi kegagalan validasi.
 6. Siapkan backup yang dapat dipulihkan, rencana pemulihan, persetujuan, pemantauan, dan jadwal perubahan.
-7. Tentukan prosedur/runner production yang disetujui di luar runner lokal repository ini.
+7. Repository juga menyediakan runner production dengan target database yang dibatasi secara eksplisit, tetapi runner tersebut belum dijalankan atau diverifikasi. Cocokkan target dan prosedur dengan change yang disetujui sebelum penggunaan; lihat [panduan migration Neon](neon-staging-migrations.md). Jangan menjalankan migration production hanya karena runner tersedia.
 
 Daftar tersebut bukan prosedur eksekusi, bukan jaminan aman, dan tidak menyatakan migration sudah diterapkan. Jangan menjalankan migration production hanya berdasarkan dokumen ini.
 
@@ -96,15 +99,19 @@ Daftar tersebut bukan prosedur eksekusi, bukan jaminan aman, dan tidak menyataka
 
 ### Source implementation
 
-Konfigurasi Netlify/Function, CSP, CORS, Origin validation, session cookie, serta pilihan limiter production PostgreSQL tersedia di source. Migration 001–009 tersedia sebagai file SQL.
+Konfigurasi Netlify/Function, CSP, CORS, Origin validation, session cookie, serta pilihan limiter production PostgreSQL tersedia di source. Migration 001–011 tersedia sebagai file SQL.
 
 ### Local testing
 
-Migration 001–007 pernah dilaporkan telah diterapkan pada database lokal, tetapi status saat ini belum diverifikasi. Migration 008 **belum dijalankan**; migration 009 **belum dijalankan atau diuji pada PostgreSQL nyata**. Test static/mock bukan bukti integrasi PostgreSQL nyata atau pengujian concurrency.
+Build frontend lulus; test frontend lulus 15/15; test backend lulus 231, gagal 0, dan melewati 3 PostgreSQL integration tests. Integration tests dilewati karena URL database test terisolasi tidak disediakan. Ini bukan bukti integrasi PostgreSQL lokal atau concurrency.
 
 ### Production verification
 
-Deployment Netlify production, nilai environment production, status migration production, koneksi PostgreSQL/Neon dari Function, backfill, perilaku rate limiter multi-instance, mapping IP Netlify, scheduled expiry, CSP pada deployment, dan backup/pemulihan **belum dijalankan atau diverifikasi**.
+Pemeriksaan baca-saja Neon menemukan ledger bootstrap `000` dan migration `001–009`; checksum seluruh entri cocok dengan source repository. Migration `010–011` belum tercatat. Pemeriksaan baca-saja menemukan 6 konser, 1 booking, 1 payment, dan 1 tiket; query konsistensi booking/payment/tiket yang dijalankan menghasilkan nol mismatch. Tidak ada migration atau perubahan data production yang dijalankan.
+
+Belum ditemukan snapshot Neon untuk branch production; backup lokal tidak diverifikasi sebagai backup production. Target database sudah cocok dengan endpoint yang di-allowlist oleh production migration runner, tetapi migration `010–011` belum diuji pada staging dan tidak boleh dijalankan sebelum backup production tersedia.
+
+Deployment Netlify production, environment variables production, koneksi PostgreSQL/Neon dari Function, perilaku rate limiter multi-instance, mapping IP Netlify, scheduled expiry, CSP pada deployment, dan pemulihan backup **belum dijalankan atau diverifikasi**.
 
 ## Kesimpulan
 

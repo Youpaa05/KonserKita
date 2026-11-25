@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 900" fill="none">
+  <defs>
+    <linearGradient id="backdrop" x1="85" y1="55" x2="1030" y2="860" gradientUnits="userSpaceOnUse"><stop stop-color="#321b56"/><stop offset=".48" stop-color="#17102d"/><stop offset="1" stop-color="#090711"/></linearGradient>
+    <radialGradient id="haze" cx="0" cy="0" r="1" gradientTransform="matrix(10 495 -620 12 594 285)" gradientUnits="userSpaceOnUse"><stop stop-color="#b58aff" stop-opacity=".65"/><stop offset=".45" stop-color="#8b5cf6" stop-opacity=".24"/><stop offset="1" stop-color="#8b5cf6" stop-opacity="0"/></radialGradient>
+    <linearGradient id="beamViolet" x1="390" y1="120" x2="570" y2="720" gradientUnits="userSpaceOnUse"><stop stop-color="#d9c1ff" stop-opacity=".62"/><stop offset="1" stop-color="#9a67ff" stop-opacity="0"/></linearGradient>
+    <linearGradient id="beamPink" x1="876" y1="114" x2="675" y2="711" gradientUnits="userSpaceOnUse"><stop stop-color="#ffa7dc" stop-opacity=".52"/><stop offset="1" stop-color="#cf53c7" stop-opacity="0"/></linearGradient>
+    <linearGradient id="screen" x1="600" y1="300" x2="600" y2="700" gradientUnits="userSpaceOnUse"><stop stop-color="#56338a"/><stop offset="1" stop-color="#20112f"/></linearGradient>
+    <linearGradient id="crowd" x1="600" y1="650" x2="600" y2="900" gradientUnits="userSpaceOnUse"><stop stop-color="#251333"/><stop offset="1" stop-color="#08060e"/></linearGradient>
+    <filter id="softGlow" x="190" y="110" width="820" height="650" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feGaussianBlur stdDeviation="48"/></filter>
+  </defs>
+  <path fill="url(#backdrop)" d="M0 0h1200v900H0z"/>
+  <ellipse cx="600" cy="376" fill="url(#haze)" rx="525" ry="377"/>
+  <g filter="url(#softGlow)" opacity=".54"><ellipse cx="370" cy="346" fill="#8b5cf6" rx="145" ry="185"/><ellipse cx="840" cy="350" fill="#c04fc7" rx="130" ry="170"/></g>
+  <path fill="url(#beamViolet)" d="m310 126 94-7 283 612-116-12z" opacity=".72"/>
+  <path fill="url(#beamViolet)" d="m433 137 55-7 180 583-72-4z" opacity=".48"/>
+  <path fill="url(#beamPink)" d="m853 112 91 18-290 606-108-14z" opacity=".74"/>
+  <path fill="url(#beamPink)" d="m746 138 54-4-135 582-69-5z" opacity=".48"/>
+  <path stroke="#cdb3ff" stroke-opacity=".38" stroke-width="8" d="M164 178h872M206 207h788"/>
+  <path stroke="#b18aff" stroke-opacity=".34" stroke-width="5" d="M220 166v74m95-74v74m95-74v74m95-74v74m95-74v74m95-74v74m95-74v74m95-74v74m95-74v74"/>
+  <circle cx="308" cy="180" r="11" fill="#e4d1ff"/><circle cx="493" cy="180" r="11" fill="#d2a8ff"/><circle cx="704" cy="180" r="11" fill="#efb2ec"/><circle cx="890" cy="180" r="11" fill="#f0c4ff"/>
+  <path fill="#130c21" stroke="#b88aff" stroke-opacity=".6" stroke-width="3" d="M338 328h524v369H338z"/>
+  <path fill="url(#screen)" d="M359 350h482v324H359z"/>
+  <path stroke="#c7a9ff" stroke-opacity=".36" stroke-width="2" d="M384 651c47-76 77-76 123 0s77 76 123 0 76-76 123 0 77 76 123 0"/>
+  <path stroke="#e5d4ff" stroke-opacity=".7" stroke-width="4" d="M384 615c47-76 77-76 123 0s77 76 123 0 76-76 123 0 77 76 123 0"/>
+  <circle cx="600" cy="514" r="91" stroke="#d9c1ff" stroke-opacity=".19" stroke-width="2"/><circle cx="600" cy="514" r="65" stroke="#d9c1ff" stroke-opacity=".28" stroke-width="2"/><circle cx="600" cy="514" r="39" fill="#a875f6" fill-opacity=".26"/>
+  <path fill="#170d25" d="M241 697h718l78 58H162z"/><path stroke="#b781ff" stroke-opacity=".42" stroke-width="4" d="M184 758h832"/>
+  <path fill="url(#crowd)" d="M0 779c18-5 32-25 44-25 17 0 21 25 39 25 19 0 22-48 47-48 20 0 23 48 43 48 18 0 21-30 39-30 20 0 23 30 43 30 18 0 20-66 44-66 22 0 25 66 47 66 22 0 26-39 48-39s25 39 47 39c20 0 22-52 47-52 24 0 27 52 50 52 18 0 20-74 47-74s28 74 50 74c19 0 24-39 47-39 22 0 24 39 46 39 20 0 22-62 48-62 23 0 27 62 49 62 21 0 23-44 45-44 24 0 27 44 48 44 18 0 21-56 45-56 23 0 28 56 49 56 17 0 22-30 40-30 22 0 25 30 45 30 18 0 24-43 44-43 17 0 23 43 42 43 14 0 26-20 42-24v145H0z"/>
+  <path fill="#08060e" fill-opacity=".75" d="M0 846c31-14 43-40 66-40 26 0 33 40 59 40 27 0 33-28 60-28 22 0 28 28 52 28 28 0 30-51 62-51 29 0 32 51 60 51 24 0 32-30 59-30 26 0 33 30 60 30 27 0 31-57 64-57 29 0 37 57 66 57 27 0 34-34 62-34 27 0 33 34 62 34 26 0 34-48 64-48 31 0 37 48 66 48 24 0 31-29 58-29 28 0 34 29 61 29 29 0 34-41 61-41 29 0 37 41 66 41 23 0 35-21 55-27v81H0z"/>
+</svg>

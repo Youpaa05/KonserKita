@@ -1,16 +1,18 @@
 import express from "express";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { pool as defaultPool } from "../config/database.js";
 import { sendError, sendSuccess } from "../utils/apiResponse.js";
 import { createRequireAuth } from "../middleware/requireAuth.js";
 import { readSessionToken } from "../utils/session.js";
 import { createRateLimiter } from "../middleware/rateLimit.js";
+import { isPaymentSimulationEnabled } from "../config/paymentSimulation.js";
 
 const MAX_NAME_LENGTH = 150;
 const MAX_EMAIL_LENGTH = 254;
 const MAX_BOOKING_QUANTITY = 100;
 const BOOKING_CODE_PATTERN = /^KK-[A-F0-9]{16}$/;
 const MAX_BIGINT = 9223372036854775807n;
+const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._~-]{16,128}$/;
 
 function validateBookingInput(body) {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
@@ -85,6 +87,14 @@ function createBookingCode() {
   return `KK-${randomBytes(8).toString("hex").toUpperCase()}`;
 }
 
+function bookingCodeForIdempotencyKey(key) {
+  return `KK-${createHash("sha256").update(key).digest("hex").slice(0, 16).toUpperCase()}`;
+}
+
+function advisoryLockKey(key) {
+  return createHash("sha256").update(key).digest().readBigInt64BE(0).toString();
+}
+
 export function createBookingRouter({
   pool = defaultPool,
   logger = console,
@@ -136,6 +146,11 @@ export function createBookingRouter({
     const customerEmail = req.user?.email ?? validation.value.customerEmail;
     const { ticketCategoryId, quantity } = validation.value;
     const userId = req.user?.id ?? null;
+    const idempotencyKey = req.get("Idempotency-Key") || "";
+
+    if (idempotencyKey && !IDEMPOTENCY_KEY_PATTERN.test(idempotencyKey)) {
+      return sendError(res, 400, "Idempotency-Key tidak valid.");
+    }
 
     let client;
     let transactionStarted = false;
@@ -145,6 +160,79 @@ export function createBookingRouter({
 
       await client.query("BEGIN");
       transactionStarted = true;
+
+      const bookingCode = idempotencyKey
+        ? bookingCodeForIdempotencyKey(idempotencyKey)
+        : generateBookingCode();
+
+      if (idempotencyKey) {
+        await client.query("SELECT pg_advisory_xact_lock($1::bigint)", [
+          advisoryLockKey(idempotencyKey),
+        ]);
+
+        const existingResult = await client.query(
+          `SELECT b.id::text AS id,
+                  b.booking_code AS "bookingCode",
+                  b.customer_name AS "customerName",
+                  b.customer_email AS "customerEmail",
+                  b.user_id::text AS "userId",
+                  b.ticket_category_id::text AS "ticketCategoryId",
+                  b.quantity,
+                  b.unit_price::double precision AS "unitPrice",
+                  b.total_price::double precision AS "totalPrice",
+                  b.status,
+                  b.created_at AS "createdAt",
+                  tc.name AS "ticketCategory",
+                  tc.quota AS "remainingQuota",
+                  c.slug AS "concertSlug",
+                  c.title AS "concertTitle"
+           FROM bookings b
+           JOIN payments p ON p.booking_id = b.id
+           JOIN ticket_categories tc ON tc.id = b.ticket_category_id
+           JOIN concerts c ON c.id = tc.concert_id
+           WHERE b.booking_code = $1
+           FOR UPDATE OF b`,
+          [bookingCode],
+        );
+
+        if (existingResult.rowCount) {
+          const existing = existingResult.rows[0];
+          const sameRequest =
+            String(existing.userId ?? "") === String(userId ?? "") &&
+            existing.ticketCategoryId === ticketCategoryId &&
+            existing.customerName === customerName &&
+            existing.customerEmail === customerEmail &&
+            Number(existing.quantity) === quantity;
+
+          if (!sameRequest) {
+            await client.query("ROLLBACK");
+            transactionStarted = false;
+            return sendError(res, 409, "Idempotency-Key sudah digunakan untuk pesanan lain.");
+          }
+
+          await client.query("COMMIT");
+          transactionStarted = false;
+          return sendSuccess(
+            res,
+            200,
+            "Pesanan yang sama sudah pernah diproses.",
+            {
+              id: existing.id,
+              bookingCode: existing.bookingCode,
+              customerName: existing.customerName,
+              quantity: existing.quantity,
+              unitPrice: existing.unitPrice,
+              totalPrice: existing.totalPrice,
+              status: existing.status,
+              createdAt: existing.createdAt,
+              concert: { slug: existing.concertSlug, title: existing.concertTitle },
+              ticketCategory: existing.ticketCategory,
+              remainingQuota: existing.remainingQuota,
+              paymentSimulation: Boolean(userId && isPaymentSimulationEnabled()),
+            },
+          );
+        }
+      }
 
       const categoryResult = await client.query(
         `SELECT
@@ -159,8 +247,9 @@ export function createBookingRouter({
          JOIN concerts AS c ON c.id = tc.concert_id
          WHERE tc.id = $1::bigint
             AND c.archived_at IS NULL
+            AND c.cancelled_at IS NULL
             AND tc.archived_at IS NULL
-         FOR UPDATE OF tc`,
+         FOR UPDATE OF tc, c`,
         [ticketCategoryId],
       );
 
@@ -188,8 +277,6 @@ export function createBookingRouter({
           { availableQuota: category.quota },
         );
       }
-
-      const bookingCode = generateBookingCode();
 
       const bookingResult = await client.query(
         `INSERT INTO bookings (
@@ -242,7 +329,7 @@ export function createBookingRouter({
         await client.query(
           `INSERT INTO user_notifications (user_id, event_key, type, title, message, booking_code)
            VALUES ($1::bigint, $2, 'booking_created', 'Pesanan berhasil dibuat',
-                   'Pesanan Anda menunggu pembayaran simulasi.', $3)
+                   'Pesanan menunggu pembayaran melalui metode yang tersedia.', $3)
            ON CONFLICT (user_id, event_key) DO NOTHING`,
           [userId, `booking:${bookingResult.rows[0].id}:created`, bookingCode],
         );
@@ -265,7 +352,7 @@ export function createBookingRouter({
       return sendSuccess(
         res,
         201,
-        "Pesanan berhasil dibuat. Pembayaran masih berupa simulasi.",
+        "Pesanan berhasil dibuat. Pembayaran belum terhubung ke payment gateway.",
         {
           ...bookingResult.rows[0],
           concert: {
@@ -274,7 +361,7 @@ export function createBookingRouter({
           },
           ticketCategory: category.name,
           remainingQuota: quotaResult.rows[0].quota,
-          paymentSimulation: true,
+          paymentSimulation: Boolean(userId && isPaymentSimulationEnabled()),
         },
       );
     } catch (error) {
@@ -365,7 +452,7 @@ export function createBookingRouter({
         "Detail pesanan berhasil ditemukan.",
         {
           ...result.rows[0],
-          paymentSimulation: true,
+          paymentSimulation: Boolean(req.user && isPaymentSimulationEnabled()),
         },
       );
     } catch (error) {

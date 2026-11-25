@@ -8,12 +8,12 @@ Dokumen ini menjelaskan bootstrap schema, migration yang tersedia di repository,
 - Bootstrap, seed, dan migration dapat mengubah schema atau data.
 - Jangan menjalankan reset, truncate, drop, seed, atau migration tanpa meninjau SQL, memastikan target, dan menyiapkan pemulihan.
 
-## Bootstrap schema dan migration 001–009
+## Bootstrap schema dan migration 001–011
 
 Database disiapkan dalam dua tahap:
 
-1. `backend/database/schema.sql` adalah bootstrap untuk tabel dasar `concerts`, `ticket_categories`, dan `bookings`. Migration 001–009 mengasumsikan tabel dasar ini sudah tersedia; rangkaian migration bukan bootstrap penuh untuk database kosong.
-2. `backend/database/migrations/001`–`009` memperluas schema secara berurutan:
+1. `backend/database/schema.sql` adalah bootstrap untuk tabel dasar `concerts`, `ticket_categories`, dan `bookings`. Migration 001–011 mengasumsikan tabel dasar ini sudah tersedia; rangkaian migration bukan bootstrap penuh untuk database kosong.
+2. `backend/database/migrations/001`–`011` memperluas schema secara berurutan:
 
    - `001`: membuat `roles` dan `users`, menambahkan `bookings.user_id` nullable dan foreign key kepemilikan booking, serta memasukkan role customer/admin.
    - `002`: membuat `user_sessions` untuk hash token sesi, masa berlaku, pencabutan sesi, dan index terkait.
@@ -24,6 +24,8 @@ Database disiapkan dalam dua tahap:
    - `007`: membuat tabel favorit konser dan notifikasi customer.
    - `008`: membuat tabel `api_rate_limit_buckets` untuk counter shared rate limiting dan mencoba mengisi tiket digital yang belum tersedia untuk booking eligible.
    - `009`: mengunci booking eligible, merekonsiliasi tiket yang kurang, dan menggagalkan transaksi jika ditemukan data lintas status yang tidak konsisten, tiket di luar rentang, konflik kode, atau hasil akhir yang tidak lengkap.
+   - `010`: menambahkan waktu/alasan pembatalan konser, constraint konsistensi, dan index; relasi booking, payment, serta tiket tidak dihapus.
+   - `011`: membuat histori transisi payment mendatang dan audit perubahan role admin; histori lama tidak direka ulang.
 
 Migration 002 memakai `INTEGER` untuk `user_sessions.user_id`, sedangkan `users.id` pada migration 001 bertipe `BIGINT`. Ini merupakan batas kapasitas yang tidak konsisten; migration lama tidak diubah. Jika perbaikan diperlukan, tinjau dampak target dan gunakan migration baru.
 
@@ -62,11 +64,18 @@ Perintah tersebut **mengubah database** dan bukan pemeriksaan status read-only. 
 
 `backend/scripts/migrate.js` membatasi target pada database `konserkita_db`, user `postgres`, port `5432`, alamat loopback IPv4/IPv6, dan koneksi read-write. Runner memakai advisory lock dan tabel `schema_migrations`, lalu memeriksa nama file serta checksum migration. Guard ini ditujukan untuk database lokal dan menolak server remote; jangan mengubah atau melewatinya untuk mengarah ke Neon.
 
+Untuk Neon staging saja, tersedia runner terpisah `backend/scripts/migrate-neon.js` melalui `npm --prefix backend run db:migrate:neon`. Runner ini dikunci ke project, branch, database, dan direct endpoint staging yang telah diverifikasi; ia tidak membaca `backend/.env`, menolak target selain staging, dan mewajibkan TLS terverifikasi. Ia bootstrap `schema.sql` hanya pada database kosong dan melacak baseline serta migration 001–011 dengan checksum. Lihat [panduan Neon staging migrations](./neon-staging-migrations.md). Runner tersebut bukan runner production.
+
+### Data demo Neon Production
+
+`backend/scripts/seed-neon-production.ps1` berisi mekanisme untuk menambahkan delapan konser fixture dan 24 kategori melalui transaksi pada target Production yang di-allowlist. Jangan menjalankan seed dalam pemulihan ini. Runner memeriksa database, role, versi PostgreSQL, checksum baseline/migration 001–011, dan konflik sebelum menulis. Keberadaan fixture bukan bukti bahwa data tersebut layak untuk katalog produk.
+
 ## Status migration
 
 - Migration 001–007 **pernah dilaporkan telah diterapkan pada database lokal**, tetapi status database saat ini tidak diverifikasi dalam dokumentasi ini. Laporan sebelumnya bukan bukti bahwa database lokal sekarang memiliki schema yang cocok.
 - Migration 008 tersedia di source tetapi **belum dijalankan**.
 - Migration 009 tersedia di source tetapi **belum dijalankan atau diuji terhadap PostgreSQL nyata**.
+- Migration 010–011 tersedia di source tetapi **belum dijalankan atau diuji pada database target**.
 - Migration production **belum dijalankan atau diverifikasi**.
 - Keberadaan file SQL atau tabel tracking tidak membuktikan bahwa migration telah diterapkan pada database yang dimaksud.
 
@@ -74,17 +83,17 @@ Dokumen ini tidak melakukan koneksi atau pemeriksaan terhadap database.
 
 ## Persiapan migration production (tanpa menjalankannya)
 
-Repository ini tidak menyediakan runner migration production untuk Neon. Jangan menggunakan `backend/scripts/migrate.js` pada target remote.
+Repository ini tidak menyediakan runner migration production untuk Neon. Jangan menggunakan `backend/scripts/migrate.js` atau runner staging pada target production.
 
 Sebelum migration production dipertimbangkan:
 
 1. Pastikan identitas database dan schema target melalui pemeriksaan read-only yang disetujui. Jika tabel `schema_migrations` tersedia, cocokkan riwayat versi, nama file, dan checksum dengan source; jangan menganggap tabel tersebut selalu ada.
-2. Tinjau bootstrap dan urutan 001–009 terhadap schema serta data target. Perhatikan backfill payment pada 005, batasan backfill awal pada 008, dan precondition/validasi 009.
+2. Tinjau bootstrap dan urutan 001–011 terhadap schema serta data target. Perhatikan backfill payment pada 005, batasan backfill awal pada 008, precondition/validasi 009, serta perubahan pembatalan dan histori pada 010–011.
 3. Siapkan salinan staging PostgreSQL yang terisolasi dan dapat dipulihkan. Pastikan penulisan aplikasi tidak berjalan selama uji migration, jalankan prosedur migration yang disetujui untuk lingkungan tersebut, lalu verifikasi jumlah dan rentang tiket per booking eligible.
 4. Uji kasus booking tanpa tiket, tiket lengkap, nomor hilang, nomor ekstra, konflik kode, payment/status tidak eligible, status tiket `used`, serta rollback saat validasi gagal. Jangan menganggap mock/static test membuktikan perilaku SQL atau concurrency PostgreSQL.
 5. Pastikan PostgreSQL target mendukung fungsi yang digunakan migration 008, termasuk `gen_random_uuid()` dan `generate_series()`.
 6. Siapkan backup yang dapat dipulihkan, rencana pemulihan, pemantauan, persetujuan perubahan, dan jadwal yang sesuai.
-7. Tentukan prosedur production yang disetujui di luar runner lokal ini. Repository tidak mendokumentasikan atau menyediakan perintah production untuk Neon.
+7. Tentukan prosedur production yang disetujui di luar runner lokal dan runner staging ini. Repository tidak menyediakan perintah production untuk Neon.
 
 Langkah di atas adalah checklist persiapan, bukan instruksi untuk menjalankan migration dan bukan bukti bahwa migration aman atau sudah diterapkan.
 
@@ -105,7 +114,7 @@ Lihat `backend/.env.example` untuk nama variabel lokal. Contoh tersebut sengaja 
 
 ## Expiry booking dan pengembalian kuota
 
-Payment baru memiliki masa berlaku 15 menit. GET payment dan payment attempt tetap memproses expiry secara langsung. Netlify Scheduled Function `backend/netlify/functions/expire-bookings.js` juga menjalankan pembersihan berkala setiap menit pada published deploy.
+Payment baru memiliki masa berlaku 15 menit. GET payment dan Netlify Scheduled Function `backend/netlify/functions/expire-bookings.js` memproses expiry. Payment attempt tidak mengubah status karena payment gateway belum tersedia.
 
 Pembersihan memproses paling banyak 100 booking per batch dan lima batch per invocation. Dalam satu transaksi, source mengunci payment serta booking yang masih `pending` dan sudah kedaluwarsa dengan `FOR UPDATE ... SKIP LOCKED`, mengubah payment menjadi `expired`, membatalkan booking, lalu mengunci kategori tiket secara berurutan dan mengembalikan kuota. Perubahan status dan kuota di-commit bersama; kegagalan menyebabkan rollback. Payment `paid` dan booking yang sudah tidak `pending` tidak dipilih, dan riwayat transaksi tidak dihapus.
 

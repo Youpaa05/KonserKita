@@ -2,7 +2,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
 import { createServer } from "node:http";
-import { createApp, resolveCorsOrigin } from "../src/app.js";
+import {
+  createApp,
+  isCorsOriginAllowed,
+  resolveCorsOrigin,
+  resolveCorsOrigins,
+} from "../src/app.js";
 import {
   getSessionCookieOptions,
   SESSION_MAX_AGE_SECONDS,
@@ -99,6 +104,27 @@ test("CORS production mensyaratkan satu origin HTTPS eksplisit", () => {
     resolveCorsOrigin({ NODE_ENV: "development" }),
     "http://localhost:5173",
   );
+  assert.equal(
+    resolveCorsOrigin({
+      NODE_ENV: "development",
+      FRONTEND_URL: "http://127.0.0.1:5173",
+    }),
+    "http://localhost:5173",
+  );
+  assert.deepEqual(
+    resolveCorsOrigins({ NODE_ENV: "development" }),
+    ["http://localhost:5173", "http://127.0.0.1:5173"],
+  );
+  assert.deepEqual(
+    resolveCorsOrigins({
+      NODE_ENV: "production",
+      FRONTEND_URL: "https://concerts.example.test",
+    }),
+    ["https://concerts.example.test"],
+  );
+  assert.equal(isCorsOriginAllowed("http://localhost:5173", resolveCorsOrigins({ NODE_ENV: "development" })), true);
+  assert.equal(isCorsOriginAllowed("http://127.0.0.1:5173", resolveCorsOrigins({ NODE_ENV: "development" })), true);
+  assert.equal(isCorsOriginAllowed("https://attacker.example", resolveCorsOrigins({ NODE_ENV: "development" })), false);
 });
 
 test("CORS cross-site memakai origin eksplisit dan credentials tanpa wildcard", async () => {
@@ -142,10 +168,10 @@ test("CORS cross-site memakai origin eksplisit dan credentials tanpa wildcard", 
 
     assert.equal(allowed.headers.get("access-control-allow-origin"), frontendOrigin);
     assert.equal(allowed.headers.get("access-control-allow-credentials"), "true");
-    assert.equal(denied.headers.get("access-control-allow-origin"), frontendOrigin);
+    assert.equal(denied.headers.get("access-control-allow-origin"), null);
     assert.notEqual(denied.headers.get("access-control-allow-origin"), "https://attacker.example");
     assert.notEqual(denied.headers.get("access-control-allow-origin"), "*");
-    assert.equal(denied.headers.get("access-control-allow-credentials"), "true");
+    assert.equal(denied.headers.get("access-control-allow-credentials"), null);
   } finally {
     await new Promise((resolve, reject) => {
       server.close((error) => error ? reject(error) : resolve());

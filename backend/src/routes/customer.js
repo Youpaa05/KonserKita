@@ -5,6 +5,7 @@ import { requireRole } from "../middleware/requireRole.js";
 import { ROLES } from "../constants/roles.js";
 import { sendError, sendSuccess } from "../utils/apiResponse.js";
 import { hashPassword, verifyPassword } from "../utils/password.js";
+import { isPaymentSimulationEnabled } from "../config/paymentSimulation.js";
 
 export function createCustomerRouter({ pool = defaultPool } = {}) {
   const router = Router();
@@ -59,6 +60,7 @@ export function createCustomerRouter({ pool = defaultPool } = {}) {
            tc.name AS "ticketCategory",
            c.slug AS "concertSlug",
            c.title AS "concertTitle",
+           c.cancelled_at AS "concertCancelledAt",
            to_char(c.event_date, 'YYYY-MM-DD') AS "eventDate",
            to_char(c.event_time, 'HH24:MI') AS "eventTime"
          FROM bookings AS b
@@ -79,6 +81,63 @@ export function createCustomerRouter({ pool = defaultPool } = {}) {
     } catch (error) {
       return next(error);
     }
+  });
+
+  router.get("/payments/history", requireAuth, requireRole(ROLES.CUSTOMER), async (req, res, next) => {
+    const pageValue = req.query.page === undefined ? "1" : req.query.page;
+    const limitValue = req.query.limit === undefined ? "20" : req.query.limit;
+    if (typeof pageValue !== "string" || !/^\d+$/.test(pageValue) || typeof limitValue !== "string" || !/^\d+$/.test(limitValue)) {
+      return sendError(res, 400, "Parameter halaman riwayat pembayaran tidak valid.");
+    }
+    const page = Number(pageValue);
+    const limit = Number(limitValue);
+    if (!Number.isSafeInteger(page) || page < 1 || !Number.isSafeInteger(limit) || limit < 1 || limit > 50) {
+      return sendError(res, 400, "Parameter halaman riwayat pembayaran di luar batas.");
+    }
+    const offset = (page - 1) * limit;
+    if (!Number.isSafeInteger(offset)) return sendError(res, 400, "Halaman riwayat pembayaran di luar batas.");
+    try {
+      const [count, result] = await Promise.all([
+        pool.query("SELECT COUNT(*)::bigint AS total FROM payments p JOIN bookings b ON b.id=p.booking_id WHERE b.user_id=$1", [req.user.id]),
+        pool.query(
+          `SELECT p.id::text AS "paymentId",
+                  b.booking_code AS "bookingCode",
+                  p.status AS "paymentStatus",
+                  p.amount::double precision AS amount,
+                  p.payment_method AS "paymentMethod",
+                  p.created_at AS "createdAt",
+                  p.paid_at AS "paidAt",
+                  p.failed_at AS "failedAt",
+                  p.expired_at AS "expiredAt",
+                  c.title AS "concertTitle",
+                  tc.name AS "ticketCategory",
+                  COALESCE((
+                    SELECT json_agg(json_build_object(
+                      'previousStatus', h.previous_status,
+                      'newStatus', h.new_status,
+                      'changedAt', h.changed_at
+                    ) ORDER BY h.changed_at ASC, h.id ASC)
+                    FROM payment_status_history h WHERE h.payment_id=p.id
+                  ), '[]'::json) AS history
+           FROM payments p
+           JOIN bookings b ON b.id=p.booking_id
+           JOIN ticket_categories tc ON tc.id=b.ticket_category_id
+           JOIN concerts c ON c.id=tc.concert_id
+           WHERE b.user_id=$1
+           ORDER BY p.created_at DESC, p.id DESC
+           LIMIT $2 OFFSET $3`,
+          [req.user.id, limit, offset],
+        ),
+      ]);
+      const total = Number(count.rows[0].total);
+      return sendSuccess(res, 200, "Riwayat pembayaran berhasil dimuat.", {
+        payments: result.rows,
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit),
+      });
+    } catch (error) { return next(error); }
   });
 
   // Detail booking dibatasi berdasarkan user_id dan kode booking.
@@ -107,6 +166,10 @@ export function createCustomerRouter({ pool = defaultPool } = {}) {
            tc.name AS "ticketCategory",
            c.slug AS "concertSlug",
            c.title AS "concertTitle",
+           c.venue,
+           c.city,
+           c.cancelled_at AS "concertCancelledAt",
+           c.cancellation_reason AS "cancellationReason",
            to_char(c.event_date, 'YYYY-MM-DD') AS "eventDate",
            to_char(c.event_time, 'HH24:MI') AS "eventTime"
          FROM bookings AS b
@@ -129,7 +192,7 @@ export function createCustomerRouter({ pool = defaultPool } = {}) {
         "Detail pesanan berhasil dimuat.",
         {
           ...result.rows[0],
-          paymentSimulation: true,
+          paymentSimulation: isPaymentSimulationEnabled(),
         },
       );
     } catch (error) {
@@ -148,7 +211,7 @@ export function createCustomerRouter({ pool = defaultPool } = {}) {
                 c.accent, c.image_url AS image, c.description,
                 f.created_at AS "favoritedAt"
          FROM concert_favorites f JOIN concerts c ON c.id=f.concert_id
-         WHERE f.user_id=$1 AND c.archived_at IS NULL
+         WHERE f.user_id=$1 AND c.archived_at IS NULL AND c.cancelled_at IS NULL
          ORDER BY f.created_at DESC, c.id DESC`,
         [req.user.id],
       );
@@ -163,7 +226,7 @@ export function createCustomerRouter({ pool = defaultPool } = {}) {
     }
     try {
       const concert = await pool.query(
-        "SELECT id FROM concerts WHERE id=$1::bigint AND archived_at IS NULL",
+        "SELECT id FROM concerts WHERE id=$1::bigint AND archived_at IS NULL AND cancelled_at IS NULL",
         [concertId],
       );
       if (!concert.rowCount) return sendError(res, 404, "Konser tidak ditemukan.");

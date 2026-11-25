@@ -76,23 +76,48 @@ function createMockPool({
   connectError = null,
 } = {}) {
   const calls = [];
+  const queryParameters = [];
   let released = 0;
+  let storedBooking = null;
+  let advisoryQueue = Promise.resolve();
 
-  const client = {
-    async query(sql) {
+  function createClient() {
+    let releaseAdvisoryLock = null;
+    return {
+    async query(sql, values = []) {
       const normalized = sql.trim().replace(/\s+/g, " ");
       calls.push(normalized);
+      queryParameters.push({ sql: normalized, values });
 
       if (normalized === "BEGIN") {
         return { rowCount: null, rows: [] };
       }
 
       if (normalized === "COMMIT") {
+        releaseAdvisoryLock?.();
+        releaseAdvisoryLock = null;
         return { rowCount: null, rows: [] };
       }
 
       if (normalized === "ROLLBACK") {
+        releaseAdvisoryLock?.();
+        releaseAdvisoryLock = null;
         return { rowCount: null, rows: [] };
+      }
+
+      if (normalized.startsWith("SELECT pg_advisory_xact_lock")) {
+        const previousLock = advisoryQueue;
+        let unlock;
+        advisoryQueue = new Promise((resolve) => { unlock = resolve; });
+        await previousLock;
+        releaseAdvisoryLock = unlock;
+        return { rowCount: 1, rows: [] };
+      }
+
+      if (normalized.startsWith("SELECT b.id::text AS id")) {
+        return storedBooking?.bookingCode === values[0]
+          ? { rowCount: 1, rows: [storedBooking] }
+          : { rowCount: 0, rows: [] };
       }
 
       if (normalized.startsWith("SELECT tc.id")) {
@@ -102,7 +127,25 @@ function createMockPool({
 
       if (normalized.startsWith("INSERT INTO bookings")) {
         if (insertError) throw insertError;
-        return { rowCount: 1, rows: [booking] };
+        const [bookingCode, userId, categoryId, customerName, customerEmail, quantity, unitPrice] = values;
+        const created = {
+          ...booking,
+          bookingCode,
+          customerName,
+          quantity,
+          unitPrice: Number(unitPrice),
+          totalPrice: Number(unitPrice) * quantity,
+        };
+        storedBooking = {
+          ...created,
+          customerEmail,
+          userId: userId === null ? null : String(userId),
+          ticketCategoryId: String(categoryId),
+          ticketCategory: category.name,
+          concertSlug: category.concert_slug,
+          concertTitle: category.concert_title,
+        };
+        return { rowCount: 1, rows: [created] };
       }
 
       if (normalized.startsWith("INSERT INTO payments")) {
@@ -112,6 +155,7 @@ function createMockPool({
 
       if (normalized.startsWith("UPDATE ticket_categories")) {
         if (quotaError) throw quotaError;
+        if (storedBooking) storedBooking.remainingQuota = quotaResult.rows[0]?.quota;
         return quotaResult;
       }
 
@@ -119,15 +163,18 @@ function createMockPool({
     },
 
     release() {
+      releaseAdvisoryLock?.();
+      releaseAdvisoryLock = null;
       released += 1;
     },
-  };
+    };
+  }
 
   const pool = {
     async connect() {
       calls.push("CONNECT");
       if (connectError) throw connectError;
-      return client;
+      return createClient();
     },
     async query() {
       throw new Error("pool.query tidak diharapkan pada POST test");
@@ -137,17 +184,21 @@ function createMockPool({
   return {
     pool,
     calls,
+    queryParameters,
     get released() {
       return released;
     },
   };
 }
 
-async function postBooking(baseUrl) {
+async function postBooking(baseUrl, payload = validPayload, idempotencyKey) {
   return fetch(`${baseUrl}/api/bookings`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(validPayload),
+    headers: {
+      "Content-Type": "application/json",
+      ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}),
+    },
+    body: JSON.stringify(payload),
   });
 }
 
@@ -288,7 +339,7 @@ test("transaksi berhasil melakukan COMMIT dan melepas koneksi", async () => {
     const body = await response.json();
     assert.equal(body.success, true);
     assert.equal(body.data.bookingCode, "KK-0123456789ABCDEF");
-    assert.equal(body.data.paymentSimulation, true);
+    assert.equal(body.data.paymentSimulation, false);
   });
 
   assert.ok(mock.calls.includes("COMMIT"));
@@ -302,6 +353,29 @@ test("transaksi berhasil melakukan COMMIT dan melepas koneksi", async () => {
     "Booking harus memeriksa status aktif kategori.",
   );
   assert.equal(mock.released, 1);
+});
+
+test("harga dan total pesanan selalu berasal dari kategori di database", async () => {
+  const mock = createMockPool();
+  const manipulatedPayload = {
+    ...validPayload,
+    unitPrice: 1,
+    totalPrice: 1,
+    amount: 1,
+  };
+
+  await withApi(mock.pool, async (baseUrl) => {
+    const response = await postBooking(baseUrl, manipulatedPayload);
+    const body = await response.json();
+    assert.equal(response.status, 201);
+    assert.equal(body.data.unitPrice, 350000);
+    assert.equal(body.data.totalPrice, 700000);
+  });
+
+  const bookingInsert = mock.queryParameters.find(({ sql }) => sql.startsWith("INSERT INTO bookings"));
+  const paymentInsert = mock.queryParameters.find(({ sql }) => sql.startsWith("INSERT INTO payments"));
+  assert.equal(bookingInsert.values[6], category.price);
+  assert.equal(paymentInsert.values[1], 700000);
 });
 
 test("kegagalan memperoleh koneksi mengembalikan 500 tanpa COMMIT", async () => {
@@ -383,7 +457,7 @@ test("GET booking mengembalikan data ketika kode ditemukan", async () => {
     assert.equal(body.success, true);
     assert.equal(body.data.bookingCode, "KK-0123456789ABCDEF");
     assert.equal(body.data.totalPrice, 700000);
-    assert.equal(body.data.paymentSimulation, true);
+    assert.equal(body.data.paymentSimulation, false);
   });
 
   assert.equal(calls.length, 1);
@@ -411,8 +485,48 @@ test("GET booking mengembalikan 500 saat query database gagal", async () => {
     assert.equal(body.success, false);
     assert.equal(typeof body.message, "string");
   });
+});
 
-  test("booking bersamaan tidak menjual kuota yang sama dua kali", async () => {
+test("Idempotency-Key mengembalikan booking yang sama tanpa mengurangi kuota dua kali", async () => {
+  const mock = createMockPool();
+  const key = "0123456789abcdef0123456789abcdef";
+
+  await withApi(mock.pool, async (baseUrl) => {
+    const responses = await Promise.all([
+      postBooking(baseUrl, validPayload, key),
+      postBooking(baseUrl, validPayload, key),
+    ]);
+    const bodies = await Promise.all(responses.map((response) => response.json()));
+    assert.deepEqual(responses.map(({ status }) => status).sort(), [200, 201]);
+    assert.equal(bodies[0].data.bookingCode, bodies[1].data.bookingCode);
+    assert.equal(mock.calls.filter((call) => call.startsWith("INSERT INTO bookings")).length, 1);
+    assert.equal(mock.calls.filter((call) => call.startsWith("INSERT INTO payments")).length, 1);
+    assert.equal(mock.calls.filter((call) => call.startsWith("UPDATE ticket_categories")).length, 1);
+  });
+});
+
+test("Idempotency-Key yang sama menolak payload pesanan berbeda", async () => {
+  const mock = createMockPool();
+  const key = "0123456789abcdef0123456789abcdef";
+
+  await withApi(mock.pool, async (baseUrl) => {
+    assert.equal((await postBooking(baseUrl, validPayload, key)).status, 201);
+    const response = await postBooking(baseUrl, { ...validPayload, quantity: 3 }, key);
+    assert.equal(response.status, 409);
+    assert.equal(mock.calls.filter((call) => call.startsWith("INSERT INTO bookings")).length, 1);
+  });
+});
+
+test("Idempotency-Key invalid ditolak sebelum transaksi", async () => {
+  const mock = createMockPool();
+  await withApi(mock.pool, async (baseUrl) => {
+    const response = await postBooking(baseUrl, validPayload, "short");
+    assert.equal(response.status, 400);
+  });
+  assert.ok(!mock.calls.includes("BEGIN"));
+});
+
+test("booking bersamaan tidak menjual kuota yang sama dua kali", async () => {
     const state = { quota: 2, bookings: [], payments: 0 };
     let nextBookingId = 1;
     let categoryLock = Promise.resolve();
@@ -503,5 +617,4 @@ test("GET booking mengembalikan 500 saat query database gagal", async () => {
     assert.equal(state.quota, 0);
     assert.equal(state.bookings.length, 1);
     assert.equal(state.payments, 1);
-  });
 });

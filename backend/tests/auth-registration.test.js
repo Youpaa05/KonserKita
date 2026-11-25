@@ -6,7 +6,7 @@ import { createApp } from "../src/app.js";
 import { createAuthRouter } from "../src/routes/auth.js";
 import { hashPassword, verifyPassword } from "../src/utils/password.js";
 
-const origin = process.env.FRONTEND_URL?.trim() || "http://localhost:5173";
+const origin = "http://localhost:5173";
 const validInput = {
   name: "Customer Test",
   email: "  CUSTOMER@example.test ",
@@ -127,7 +127,7 @@ function makeAuthApp(pool) {
   });
 }
 
-async function requestRegistration(pool, input = validInput) {
+async function requestRegistration(pool, input = validInput, requestOrigin = origin) {
   const app = makeAuthApp(pool);
   const server = createServer(app);
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -135,7 +135,7 @@ async function requestRegistration(pool, input = validInput) {
   try {
     return await fetch(`http://127.0.0.1:${server.address().port}/api/auth/register`, {
       method: "POST",
-      headers: { Origin: origin, "Content-Type": "application/json" },
+      headers: { Origin: requestOrigin, "Content-Type": "application/json" },
       body: JSON.stringify(input),
     });
   } finally {
@@ -143,15 +143,22 @@ async function requestRegistration(pool, input = validInput) {
   }
 }
 
-async function requestLogin(pool, input = { email: validInput.email, password: validInput.password }) {
+async function requestLogin(
+  pool,
+  input = { email: validInput.email, password: validInput.password },
+  requestOrigin = origin,
+) {
   const app = makeAuthApp(pool);
   const server = createServer(app);
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 
   try {
+    const headers = { "Content-Type": "application/json" };
+    if (requestOrigin !== null) headers.Origin = requestOrigin;
+
     return await fetch(`http://127.0.0.1:${server.address().port}/api/auth/login`, {
       method: "POST",
-      headers: { Origin: origin, "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify(input),
     });
   } finally {
@@ -181,6 +188,28 @@ test("registrasi valid membuat akun dan sesi dalam satu transaksi lalu memasang 
   assert.equal(response.headers.get("set-cookie")?.includes("HttpOnly"), true);
   assert.equal(state.cookieSetAfterCommit, true);
   assert.equal(state.released, 1);
+});
+
+test("registrasi menolak Origin asing sebelum mengakses database", async () => {
+  const { pool, state } = makePool();
+  const response = await requestRegistration(pool, validInput, "https://attacker.example");
+  const body = await response.json();
+
+  assert.equal(response.status, 403);
+  assert.equal(body.message, "Origin request tidak diizinkan.");
+  assert.equal(state.connectCalls, 0);
+});
+
+test("registrasi menerima origin loopback alternatif lokal", async () => {
+  const { pool, state } = makePool();
+  const response = await requestRegistration(
+    pool,
+    { ...validInput, email: "loopback@example.test" },
+    "http://127.0.0.1:5173",
+  );
+
+  assert.equal(response.status, 201);
+  assert.equal(state.connectCalls, 1);
 });
 
 for (const [name, input] of [
@@ -279,4 +308,97 @@ test("login tetap membuat sesi melalui pool dan tidak mengembalikan hash passwor
   assert.equal(Object.hasOwn(body.data, "password_hash"), false);
   assert.equal(JSON.stringify(body).includes(passwordHash), false);
   assert.equal(response.headers.get("set-cookie")?.includes("HttpOnly"), true);
+});
+
+test("login menolak Origin asing sebelum memeriksa kredensial", async () => {
+  const { pool } = makePool();
+  const response = await requestLogin(
+    pool,
+    { email: validInput.email, password: validInput.password },
+    "https://attacker.example",
+  );
+  const body = await response.json();
+
+  assert.equal(response.status, 403);
+  assert.equal(body.message, "Origin request tidak diizinkan.");
+});
+
+test("login menerima origin loopback alternatif lokal", async () => {
+  const passwordHash = await hashPassword(validInput.password);
+  const pool = {
+    async query(sql) {
+      if (sql.includes("FROM users u")) {
+        return { rows: [{ id: "42", name: "Customer Test", email: "customer@example.test", password_hash: passwordHash, role: "customer" }] };
+      }
+      if (sql.includes("INSERT INTO user_sessions")) return { rows: [], rowCount: 1 };
+      throw new Error("Unexpected login query");
+    },
+  };
+  const response = await requestLogin(
+    pool,
+    { email: validInput.email, password: validInput.password },
+    "http://127.0.0.1:5173",
+  );
+
+  assert.equal(response.status, 200);
+});
+
+test("login menerima kedua origin development dan mengirim cookie sesi", async () => {
+  const passwordHash = await hashPassword(validInput.password);
+
+  for (const requestOrigin of [origin, "http://127.0.0.1:5173"]) {
+    let sessionInserted = false;
+    const pool = {
+      async query(sql) {
+        if (sql.includes("FROM users u")) {
+          return {
+            rows: [{
+              id: "42",
+              name: "Customer Test",
+              email: validInput.email,
+              password_hash: passwordHash,
+              role: "customer",
+            }],
+          };
+        }
+        if (sql.includes("INSERT INTO user_sessions")) {
+          sessionInserted = true;
+          return { rows: [], rowCount: 1 };
+        }
+        throw new Error("Unexpected login query");
+      },
+    };
+    const response = await requestLogin(
+      pool,
+      { email: validInput.email, password: validInput.password },
+      requestOrigin,
+    );
+
+    assert.equal(response.status, 200, requestOrigin);
+    assert.equal(sessionInserted, true, requestOrigin);
+    assert.match(response.headers.get("set-cookie") || "", /kk_session=.*HttpOnly/);
+    assert.equal(response.headers.get("access-control-allow-origin"), requestOrigin);
+    assert.equal(response.headers.get("access-control-allow-credentials"), "true");
+  }
+});
+
+test("login tanpa Origin ditolak sebelum memeriksa kredensial", async () => {
+  let queried = false;
+  const pool = {
+    async query() {
+      queried = true;
+      throw new Error("Login must not query credentials without an Origin");
+    },
+  };
+  const response = await requestLogin(
+    pool,
+    { email: validInput.email, password: validInput.password },
+    null,
+  );
+  const body = await response.json();
+
+  assert.equal(response.status, 403);
+  assert.equal(body.message, "Origin request tidak diizinkan.");
+  assert.equal(queried, false);
+  assert.equal(response.headers.has("set-cookie"), false);
 });

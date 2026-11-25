@@ -1,12 +1,16 @@
-import { useEffect, useState } from "react";
-import { Link, NavLink } from "react-router-dom";
+import { useEffect, useRef, useState } from "react";
+import { Link, NavLink, useLocation } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { getUnreadNotificationCount } from "../services/api";
 
 export default function Navbar() {
   const { user, loading, logout } = useAuth();
+  const location = useLocation();
+  const navigationRef = useRef(null);
+  const menuToggleRef = useRef(null);
   const [unreadCount, setUnreadCount] = useState(0);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [logoutError, setLogoutError] = useState("");
   useEffect(() => {
     if (!user || user.role !== "customer") {
       setUnreadCount(0);
@@ -21,25 +25,53 @@ export default function Navbar() {
     return () => controller.abort();
   }, [user]);
 
+  useEffect(() => {
+    setMenuOpen(false);
+    setLogoutError("");
+  }, [location.pathname]);
+
+  useEffect(() => {
+    if (!menuOpen) return undefined;
+    function handleOutsideClick(event) {
+      if (!navigationRef.current?.contains(event.target)) setMenuOpen(false);
+    }
+    function handleEscape(event) {
+      if (event.key === "Escape") {
+        setMenuOpen(false);
+        menuToggleRef.current?.focus();
+      }
+    }
+    document.addEventListener("pointerdown", handleOutsideClick);
+    document.addEventListener("keydown", handleEscape);
+    return () => {
+      document.removeEventListener("pointerdown", handleOutsideClick);
+      document.removeEventListener("keydown", handleEscape);
+    };
+  }, [menuOpen]);
+
   async function handleLogout() {
+    setLogoutError("");
     try {
       await logout();
+      setMenuOpen(false);
     } catch (error) {
-      window.alert(error.message || "Logout gagal. Silakan coba kembali.");
+      setLogoutError(error.message || "Logout gagal. Silakan coba kembali.");
     }
   }
 
   return (
     <header className="site-header">
-      <nav className="navbar container" aria-label="Navigasi utama">
+      <nav ref={navigationRef} className="navbar container" aria-label="Navigasi utama">
         <Link className="brand" to="/" aria-label="KonserKita beranda">
           <span className="brand-mark" aria-hidden="true">K</span>
           <span>Konser<span className="brand-light">Kita</span></span>
         </Link>
 
         <button
+          ref={menuToggleRef}
           type="button"
           className="nav-menu-toggle"
+          aria-label={menuOpen ? "Tutup menu navigasi" : "Buka menu navigasi"}
           aria-expanded={menuOpen}
           aria-controls="primary-navigation-links"
           onClick={() => setMenuOpen((open) => !open)}
@@ -63,27 +95,13 @@ export default function Navbar() {
           <div className="nav-links nav-account-links">
             {!loading && user ? (
               <>
-                <Link to={user.role === "admin" ? "/admin/dashboard" : "/customer/dashboard"}>
+                <NavLink to={user.role === "admin" ? "/admin/dashboard" : "/customer/dashboard"}>
                   {user.name}
-                </Link>
-                {user.role === "admin" && (
-                  <>
-                    <NavLink to="/admin/concerts">Manajemen Konser</NavLink>
-                    <NavLink to="/admin/orders">Pesanan</NavLink>
-                    <NavLink to="/admin/payments">Pembayaran</NavLink>
-                    <NavLink to="/admin/ticket-check">Periksa Tiket</NavLink>
-                  </>
-                )}
+                </NavLink>
                 {user.role === "customer" && (
-                  <>
-                    <NavLink to="/customer/bookings">Pesanan saya</NavLink>
-                    <NavLink to="/customer/tickets">Tiket Saya</NavLink>
-                    <NavLink to="/customer/favorites">Favorit</NavLink>
-                    <NavLink to="/customer/notifications">
-                      Notifikasi{unreadCount > 0 ? ` (${unreadCount})` : ""}
-                    </NavLink>
-                    <NavLink to="/profile">Profil</NavLink>
-                  </>
+                  <NavLink to="/customer/notifications" aria-label={unreadCount > 0 ? `Notifikasi, ${unreadCount} belum dibaca` : "Notifikasi"}>
+                    <span className="nav-notification-label">Notifikasi</span>{unreadCount > 0 && <span className="nav-notification-count" aria-hidden="true">{unreadCount > 99 ? "99+" : unreadCount}</span>}
+                  </NavLink>
                 )}
                 <button type="button" className="nav-cta" onClick={handleLogout}>
                   Logout
@@ -98,6 +116,7 @@ export default function Navbar() {
               </>
             )}
           </div>
+          {logoutError && <p className="nav-error" role="alert">{logoutError}</p>}
         </div>
       </nav>
     </header>

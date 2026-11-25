@@ -20,14 +20,20 @@ import PaymentPage from "./pages/PaymentPage";
 import PaymentResult from "./pages/PaymentResult";
 import { AdminOrders, AdminOrderDetail } from "./pages/AdminOrders";
 import CustomerTickets from "./pages/CustomerTickets";
+import CustomerPayments from "./pages/CustomerPayments";
+import CustomerTicketDetail from "./pages/CustomerTicketDetail";
 import AdminTicketCheck from "./pages/AdminTicketCheck";
 import CustomerFavorites from "./pages/CustomerFavorites";
 import CustomerNotifications from "./pages/CustomerNotifications";
 import AdminPaymentReports from "./pages/AdminPaymentReports";
+import AdminUsers from "./pages/AdminUsers";
+import AdminAudit from "./pages/AdminAudit";
+import { AdminLayout, CustomerLayout } from "./components/AreaLayout";
 import "./styles/global.css";
 import "./styles/components.css";
 import "./styles/pages.css";
 import "./styles/auth.css";
+import "./styles/design-system.css";
 
 export default function App() {
   return (
@@ -47,22 +53,30 @@ export default function App() {
           <Route path="/dashboard" element={<DashboardRedirect />} />
 
           <Route element={<ProtectedRoute allowedRoles={["customer"]} />}>
-            <Route path="/customer/dashboard" element={<CustomerDashboard />} />
-            <Route path="/customer/bookings" element={<CustomerBookingHistory />} />
-            <Route path="/customer/bookings/:bookingCode" element={<CustomerBookingDetail />} />
-            <Route path="/customer/tickets" element={<CustomerTickets />} />
-            <Route path="/customer/favorites" element={<CustomerFavorites />} />
-            <Route path="/customer/notifications" element={<CustomerNotifications />} />
-            <Route path="/profile" element={<Profile />} />
+            <Route element={<CustomerLayout />}>
+              <Route path="/customer/dashboard" element={<CustomerDashboard />} />
+              <Route path="/customer/bookings" element={<CustomerBookingHistory />} />
+              <Route path="/customer/bookings/:bookingCode" element={<CustomerBookingDetail />} />
+              <Route path="/customer/payments" element={<CustomerPayments />} />
+              <Route path="/customer/tickets" element={<CustomerTickets />} />
+              <Route path="/customer/tickets/:ticketCode" element={<CustomerTicketDetail />} />
+              <Route path="/customer/favorites" element={<CustomerFavorites />} />
+              <Route path="/customer/notifications" element={<CustomerNotifications />} />
+              <Route path="/profile" element={<Profile />} />
+            </Route>
           </Route>
 
           <Route element={<ProtectedRoute allowedRoles={["admin"]} />}>
-            <Route path="/admin/dashboard" element={<AdminDashboard />} />
-            <Route path="/admin/concerts" element={<AdminConcerts />} />
-            <Route path="/admin/orders" element={<AdminOrders />} />
-            <Route path="/admin/orders/:bookingCode" element={<AdminOrderDetail />} />
-            <Route path="/admin/payments" element={<AdminPaymentReports />} />
-            <Route path="/admin/ticket-check" element={<AdminTicketCheck />} />
+            <Route element={<AdminLayout />}>
+              <Route path="/admin/dashboard" element={<AdminDashboard />} />
+              <Route path="/admin/concerts" element={<AdminConcerts />} />
+              <Route path="/admin/users" element={<AdminUsers />} />
+              <Route path="/admin/audit" element={<AdminAudit />} />
+              <Route path="/admin/orders" element={<AdminOrders />} />
+              <Route path="/admin/orders/:bookingCode" element={<AdminOrderDetail />} />
+              <Route path="/admin/payments" element={<AdminPaymentReports />} />
+              <Route path="/admin/ticket-check" element={<AdminTicketCheck />} />
+            </Route>
           </Route>
           <Route path="*" element={<NotFound />} />
         </Routes>

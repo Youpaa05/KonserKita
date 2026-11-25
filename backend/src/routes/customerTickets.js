@@ -11,7 +11,8 @@ const TICKET_SELECT = `SELECT t.ticket_code AS "ticketCode", t.ticket_number AS 
  b.booking_code AS "bookingCode", b.customer_name AS "ownerName",
  tc.name AS "ticketCategory", c.title AS "concertTitle", c.slug AS "concertSlug",
  c.venue, c.city, to_char(c.event_date, 'YYYY-MM-DD') AS "eventDate",
- to_char(c.event_time, 'HH24:MI') AS "eventTime"
+ to_char(c.event_time, 'HH24:MI') AS "eventTime",
+ c.cancelled_at AS "concertCancelledAt", c.cancellation_reason AS "cancellationReason"
  FROM digital_tickets t JOIN bookings b ON b.id=t.booking_id
  JOIN payments p ON p.booking_id=b.id
  JOIN ticket_categories tc ON tc.id=b.ticket_category_id

@@ -16,12 +16,14 @@ export default function SearchBar({
   onDateToChange,
   sort,
   onSortChange,
+  direction,
+  onDirectionChange,
   availability,
   onAvailabilityChange,
 }) {
   return (
-    <div className="search-panel">
-      <label className="search-field">
+    <section className="search-panel" aria-label="Cari dan filter konser">
+      <label className="search-field search-field-primary">
         <span className="field-icon" aria-hidden="true">⌕</span>
         <span className="visually-hidden">Cari konser atau artis</span>
         <input
@@ -70,6 +72,14 @@ export default function SearchBar({
       </label>
 
       <label className="filter-field">
+        <span className="visually-hidden">Arah pengurutan</span>
+        <select value={direction} onChange={(event) => onDirectionChange(event.target.value)}>
+          <option value="asc">Urutan naik</option>
+          <option value="desc">Urutan turun</option>
+        </select>
+      </label>
+
+      <label className="filter-field">
         <span className="visually-hidden">Kota konser</span>
         <select
           value={city}
@@ -83,6 +93,6 @@ export default function SearchBar({
           ))}
         </select>
       </label>
-    </div>
+    </section>
   );
 }

@@ -12,13 +12,16 @@ const TICKET_DETAILS = `SELECT t.id, t.ticket_code AS "ticketCode",
  t.issued_at AS "issuedAt", t.used_at AS "usedAt", t.used_by AS "usedBy",
  b.booking_code AS "bookingCode", b.customer_name AS "ownerName",
  b.status AS "bookingStatus", p.status AS "paymentStatus",
+ c.cancelled_at AS "concertCancelledAt",
+ validator.name AS "validatorName",
  tc.name AS "ticketCategory", c.title AS "concertTitle", c.venue, c.city,
  to_char(c.event_date, 'YYYY-MM-DD') AS "eventDate",
  to_char(c.event_time, 'HH24:MI') AS "eventTime"
  FROM digital_tickets t JOIN bookings b ON b.id=t.booking_id
  JOIN payments p ON p.booking_id=b.id
  JOIN ticket_categories tc ON tc.id=b.ticket_category_id
- JOIN concerts c ON c.id=tc.concert_id`;
+ JOIN concerts c ON c.id=tc.concert_id
+ LEFT JOIN users validator ON validator.id=t.used_by`;
 
 export function createAdminTicketRouter({ pool = defaultPool } = {}) {
   const router = Router();
@@ -39,7 +42,7 @@ export function createAdminTicketRouter({ pool = defaultPool } = {}) {
     try {
       await client.query("BEGIN");
       const found = await client.query(
-        `${TICKET_DETAILS} WHERE t.ticket_code=$1 FOR UPDATE OF t,b,p`,
+        `${TICKET_DETAILS} WHERE t.ticket_code=$1 FOR UPDATE OF t,b,p,c`,
         [req.body.ticketCode],
       );
       if (!found.rowCount) {
@@ -51,6 +54,10 @@ export function createAdminTicketRouter({ pool = defaultPool } = {}) {
       if (ticket.paymentStatus !== "paid" || ticket.bookingStatus !== "confirmed") {
         await client.query("ROLLBACK");
         return sendError(res, 409, "Pembayaran atau booking tiket tidak valid.");
+      }
+      if (ticket.concertCancelledAt) {
+        await client.query("ROLLBACK");
+        return sendError(res, 409, "Konser telah dibatalkan; tiket tidak dapat digunakan.");
       }
       if (ticket.ticketStatus !== "issued") {
         await client.query("ROLLBACK");
@@ -99,6 +106,7 @@ export function createAdminTicketRouter({ pool = defaultPool } = {}) {
           city: ticket.city,
           eventDate: ticket.eventDate,
           eventTime: ticket.eventTime,
+          validatorName: req.user.name,
         },
       });
     } catch (error) {

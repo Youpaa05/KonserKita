@@ -1,6 +1,14 @@
-const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "").replace(/\/+$/, "");
+const API_BASE_URL = import.meta.env?.DEV
+  ? ""
+  : (import.meta.env?.VITE_API_BASE_URL || "").replace(/\/+$/, "");
 
-async function request(path, { method = "GET", body, signal } = {}) {
+function isValidDateOnly(value) {
+  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) &&
+    !Number.isNaN(Date.parse(`${value}T00:00:00Z`)) &&
+    new Date(`${value}T00:00:00Z`).toISOString().slice(0, 10) === value;
+}
+
+async function request(path, { method = "GET", body, signal, idempotencyKey } = {}) {
   let response;
 
   try {
@@ -9,6 +17,7 @@ async function request(path, { method = "GET", body, signal } = {}) {
       credentials: "include",
       headers: {
         Accept: "application/json",
+        ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}),
         ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
       },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
@@ -19,6 +28,16 @@ async function request(path, { method = "GET", body, signal } = {}) {
     throw new Error(
       "Tidak dapat menghubungi server. Pastikan backend KonserKita sedang berjalan.",
     );
+  }
+
+  const contentType = response.headers.get("content-type") || "";
+  if (!contentType.toLowerCase().includes("json")) {
+    const error = new Error(
+      `Server mengirim respons non-JSON (HTTP ${response.status}). Periksa koneksi API dan konfigurasi proxy.`,
+    );
+    error.status = response.status;
+    error.contentType = contentType;
+    throw error;
   }
 
   let result;
@@ -95,12 +114,13 @@ export function getTicketCategories(idOrSlug, { signal } = {}) {
 
 export function createBooking(
   { customerName, customerEmail, ticketCategoryId, quantity },
-  { signal } = {},
+  { signal, idempotencyKey } = {},
 ) {
   return request("/api/bookings", {
     method: "POST",
     body: { customerName, customerEmail, ticketCategoryId, quantity },
     signal,
+    idempotencyKey,
   });
 }
 
@@ -216,6 +236,12 @@ export function archiveAdminConcert(id) {
   });
 }
 
+export function cancelAdminConcert(id, reason) {
+  return request(`/api/admin/concerts/${encodeURIComponent(id)}/cancel`, {
+    method: "POST", body: { reason },
+  });
+}
+
 export function restoreAdminConcert(id) {
   return request("/api/admin/concerts/" + encodeURIComponent(id) + "/restore", {
     method: "POST",
@@ -257,6 +283,11 @@ export function getCustomerBookings({ signal } = {}) {
   return request("/api/customer/bookings", { signal });
 }
 
+export function getCustomerPaymentHistory({ page = 1, limit = 20, signal } = {}) {
+  const params = new URLSearchParams({ page: String(page), limit: String(limit) });
+  return request(`/api/customer/payments/history?${params}`, { signal });
+}
+
 // Detail booking hanya dapat diakses oleh pemilik akun.
 export function getCustomerBookingDetail(bookingCode, { signal } = {}) {
   return request(
@@ -269,9 +300,15 @@ export function getPayment(bookingCode, { signal } = {}) {
   return request(`/api/payments/${encodeURIComponent(bookingCode)}`, { signal });
 }
 
-export function attemptPayment(bookingCode, outcome) {
+export function attemptPayment(bookingCode, outcome, { signal } = {}) {
+  if (!/^KK-[A-F0-9]{16}$/i.test(String(bookingCode || ""))) {
+    return Promise.reject(new Error("Format kode pesanan tidak valid."));
+  }
+  if (outcome !== "success" && outcome !== "failure") {
+    return Promise.reject(new Error("Hasil simulasi tidak valid."));
+  }
   return request(`/api/payments/${encodeURIComponent(bookingCode)}/attempt`, {
-    method: "POST", body: { outcome },
+    method: "POST", body: { outcome }, signal,
   });
 }
 
@@ -285,6 +322,43 @@ export function getAdminOrder(bookingCode, { signal } = {}) {
   return request(`/api/admin/orders/${encodeURIComponent(bookingCode)}`, { signal });
 }
 
+export function getAdminPaymentHistory(bookingCode, { signal } = {}) {
+  return request(`/api/admin/payments/${encodeURIComponent(bookingCode)}/history`, { signal });
+}
+
+export function getAdminUsers({ q = "", role = "", page = 1, limit = 20, signal } = {}) {
+  const params = new URLSearchParams({ page: String(page), limit: String(limit) });
+  if (q) params.set("q", q);
+  if (role) params.set("role", role);
+  return request(`/api/admin/users?${params}`, { signal });
+}
+
+export function getAdminRoleChangeAudit({ page = 1, limit = 20, signal } = {}) {
+  const params = new URLSearchParams({ page: String(page), limit: String(limit) });
+  return request(`/api/admin/audit/role-changes?${params}`, { signal });
+}
+
+export function changeAdminUserRole(userId, role) {
+  return request(`/api/admin/users/${encodeURIComponent(userId)}/role`, { method: "PATCH", body: { role } });
+}
+
+export async function downloadAdminCsv(path, filters = {}) {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(filters)) if (value !== "" && value !== undefined) params.set(key, String(value));
+  const response = await fetch(`${API_BASE_URL}${path}${params.size ? `?${params}` : ""}`, { credentials: "include", headers: { Accept: "text/csv" } });
+  if (!response.ok) {
+    let message = "CSV gagal diunduh.";
+    try { message = (await response.json()).message || message; } catch { /* non-JSON error */ }
+    throw new Error(message);
+  }
+  const blob = await response.blob();
+  const filename = response.headers.get("Content-Disposition")?.match(/filename="([^"]+)"/)?.[1] || "konserkita-report.csv";
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a"); anchor.href = url; anchor.download = filename; anchor.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return response.headers.get("X-Export-Truncated") === "true";
+}
+
 export function getAdminConcertAnalytics({ from = "", to = "", sort = "ticketQuantity", direction = "desc", page = 1, limit = 10, signal } = {}) {
   const params = new URLSearchParams({ sort, direction, page: String(page), limit: String(limit) });
   if (from) params.set("from", from);
@@ -292,7 +366,10 @@ export function getAdminConcertAnalytics({ from = "", to = "", sort = "ticketQua
   return request(`/api/admin/analytics/concerts?${params}`, { signal });
 }
 
-export function getAdminTrends({ from, to, interval = "day", signal } = {}) {
+export function getAdminTrends({ from = "", to = "", interval = "day", signal } = {}) {
+  if (!isValidDateOnly(from) || !isValidDateOnly(to) || from > to || !["day", "month"].includes(interval)) {
+    return Promise.reject(new Error("Periode tren tidak valid."));
+  }
   const params = new URLSearchParams({ from, to, interval });
   return request(`/api/admin/analytics/trends?${params}`, { signal });
 }
