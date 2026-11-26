@@ -25,6 +25,7 @@ export const EXPECTED_MIGRATION_FILES = Object.freeze([
   "009_reconcile_digital_tickets.sql",
   "010_concert_cancellation.sql",
   "011_admin_operations_history.sql",
+  "012_user_sessions_user_id_bigint.sql",
 ]);
 
 const DATABASE_IDENTITY_QUERY = `
@@ -32,6 +33,7 @@ const DATABASE_IDENTITY_QUERY = `
          current_user AS role_name,
          current_setting('transaction_read_only') AS transaction_read_only,
          current_setting('server_version_num') AS server_version_num,
+         has_schema_privilege(current_user, 'public', 'USAGE') AS can_use_public,
          has_schema_privilege(current_user, 'public', 'CREATE') AS can_create_public
 `;
 
@@ -40,7 +42,7 @@ const DATABASE_CONTENT_QUERY = `
     SELECT oid, nspname
     FROM pg_namespace
     WHERE nspname NOT IN ('pg_catalog', 'information_schema')
-      AND nspname NOT LIKE 'pg_%'
+      AND nspname !~ '^pg_'
   )
   SELECT
     (SELECT COUNT(*) FROM user_schemas) AS non_system_schema_count,
@@ -72,6 +74,12 @@ const DATABASE_CONTENT_QUERY = `
      FROM pg_opfamily f
      JOIN user_schemas n ON n.oid = f.opfnamespace) AS operator_family_count,
     (SELECT COUNT(*)
+     FROM pg_operator o
+     JOIN user_schemas n ON n.oid = o.oprnamespace) AS operator_count,
+    (SELECT COUNT(*)
+     FROM pg_statistic_ext s
+     JOIN user_schemas n ON n.oid = s.stxnamespace) AS statistics_count,
+    (SELECT COUNT(*)
      FROM pg_ts_config c
      JOIN user_schemas n ON n.oid = c.cfgnamespace) AS text_search_config_count,
     (SELECT COUNT(*)
@@ -84,9 +92,26 @@ const DATABASE_CONTENT_QUERY = `
      FROM pg_ts_template t
      JOIN user_schemas n ON n.oid = t.tmplnamespace) AS text_search_template_count,
     (SELECT COUNT(*)
+     FROM pg_language l
+     WHERE l.lanname NOT IN ('internal', 'c', 'sql', 'plpgsql')) AS custom_language_count,
+    (SELECT COUNT(*) FROM pg_event_trigger) AS event_trigger_count,
+    (SELECT COUNT(*) FROM pg_publication) AS publication_count,
+    (SELECT COUNT(*) FROM pg_subscription) AS subscription_count,
+    (SELECT COUNT(*) FROM pg_replication_origin) AS replication_origin_count,
+    (SELECT COUNT(*) FROM pg_foreign_data_wrapper) AS foreign_data_wrapper_count,
+    (SELECT COUNT(*) FROM pg_foreign_server) AS foreign_server_count,
+    (SELECT COUNT(*) FROM pg_user_mapping) AS user_mapping_count,
+    (SELECT COUNT(*) FROM pg_transform) AS transform_count,
+    (SELECT COUNT(*)
+     FROM pg_db_role_setting s
+     WHERE s.setdatabase = (
+       SELECT oid FROM pg_database WHERE datname = current_database()
+     )) AS database_setting_count,
+    (SELECT COUNT(*) FROM pg_largeobject_metadata) AS large_object_count,
+    (SELECT COUNT(*)
      FROM pg_default_acl d
      LEFT JOIN pg_namespace n ON n.oid = d.defaclnamespace
-     WHERE NOT (
+     WHERE n.oid IS NULL OR NOT (
        pg_get_userbyid(d.defaclrole) = 'cloud_admin'
        AND n.nspname = 'public'
        AND (
@@ -183,7 +208,7 @@ async function loadMigrationFiles(directory) {
   return migrations;
 }
 
-function isDatabaseEmpty(row) {
+function isBootstrapSchemaSafe(row) {
   return Number(row.non_system_schema_count) === 1 &&
     row.has_public_schema === true &&
     Number(row.relation_count) === 0 &&
@@ -194,10 +219,23 @@ function isDatabaseEmpty(row) {
     Number(row.conversion_count) === 0 &&
     Number(row.operator_class_count) === 0 &&
     Number(row.operator_family_count) === 0 &&
+    Number(row.operator_count) === 0 &&
+    Number(row.statistics_count) === 0 &&
     Number(row.text_search_config_count) === 0 &&
     Number(row.text_search_dictionary_count) === 0 &&
     Number(row.text_search_parser_count) === 0 &&
     Number(row.text_search_template_count) === 0 &&
+    Number(row.custom_language_count) === 0 &&
+    Number(row.event_trigger_count) === 0 &&
+    Number(row.publication_count) === 0 &&
+    Number(row.subscription_count) === 0 &&
+    Number(row.replication_origin_count) === 0 &&
+    Number(row.foreign_data_wrapper_count) === 0 &&
+    Number(row.foreign_server_count) === 0 &&
+    Number(row.user_mapping_count) === 0 &&
+    Number(row.transform_count) === 0 &&
+    Number(row.database_setting_count) === 0 &&
+    Number(row.large_object_count) === 0 &&
     Number(row.unexpected_default_privilege_count) === 0;
 }
 
@@ -260,15 +298,20 @@ async function executeTransaction(client, stage, callback) {
   }
 }
 
-async function verifyDatabaseTarget(client, expectedRole) {
+async function verifyDatabaseTarget(client, expectedRole, expectedDatabaseName) {
   const result = await client.query(DATABASE_IDENTITY_QUERY);
   const identity = result.rows[0];
   if (
     !identity ||
-    identity.database_name !== "neondb" ||
-    (expectedRole && identity.role_name !== expectedRole) ||
+    identity.database_name !== expectedDatabaseName ||
+    typeof expectedDatabaseName !== "string" ||
+    !expectedDatabaseName.trim() ||
+    typeof expectedRole !== "string" ||
+    !expectedRole.trim() ||
+    identity.role_name !== expectedRole ||
     identity.transaction_read_only !== "off" ||
     Number(identity.server_version_num) < 140000 ||
+    identity.can_use_public !== true ||
     identity.can_create_public !== true
   ) {
     throw new MigrationRunnerError("database identity and privilege verification");
@@ -308,6 +351,7 @@ function log(logger, method, message) {
 export async function runMigrationEngine({
   client,
   expectedRole,
+  expectedDatabaseName = "neondb",
   logger = console,
   migrationsPath = migrationsDirectory,
   schemaPath = schemaFile,
@@ -324,7 +368,7 @@ export async function runMigrationEngine({
     }
 
     stage = "database identity and privilege verification";
-    await verifyDatabaseTarget(client, expectedRole);
+    await verifyDatabaseTarget(client, expectedRole, expectedDatabaseName);
 
     stage = "migration lock";
     await client.query("SELECT pg_advisory_lock($1)", [ADVISORY_LOCK_KEY]);
@@ -357,12 +401,12 @@ export async function runMigrationEngine({
     } else {
       stage = "empty database verification";
       const contentResult = await client.query(DATABASE_CONTENT_QUERY);
-      if (!contentResult.rows[0] || !isDatabaseEmpty(contentResult.rows[0])) {
-        throw new MigrationRunnerError("empty database verification");
+      if (!contentResult.rows[0] || !isBootstrapSchemaSafe(contentResult.rows[0])) {
+        throw new MigrationRunnerError("bootstrap schema verification");
       }
 
       stage = "schema bootstrap";
-      log(logger, "log", "Bootstrapping empty database.");
+      log(logger, "log", "Bootstrapping database after configured safety checks passed.");
       await bootstrapDatabase(client, schemaSql, schemaChecksum);
       historyRows = [{
         version: VERSION_SCHEMA,

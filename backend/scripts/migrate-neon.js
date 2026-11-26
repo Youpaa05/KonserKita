@@ -13,11 +13,30 @@ const currentDirectory = path.dirname(fileURLToPath(import.meta.url));
 export { EXPECTED_MIGRATION_FILES, MigrationRunnerError };
 
 export const STAGING_TARGET = Object.freeze({
-  projectId: "twilight-block-46431039",
-  branchId: "br-lively-glitter-bdluy8ax",
+  projectId: "silent-hat-21218854",
+  branchName: "staging",
+  branchId: "br-quiet-river-bda1sb4d",
   databaseName: "neondb",
-  endpointHost: "ep-mute-fire-bdv1e9ll.c-8.us-east-2.aws.neon.tech",
+  role: "neondb_owner",
+  endpointHost: "ep-dark-dawn-bdayxwt3-pooler.c-8.us-east-2.aws.neon.tech",
+  directEndpointHost: "ep-dark-dawn-bdayxwt3.c-8.us-east-2.aws.neon.tech",
 });
+
+const ALLOWED_STAGING_TARGETS = Object.freeze([
+  Object.freeze({
+    target: STAGING_TARGET,
+    acceptedHosts: Object.freeze([
+      STAGING_TARGET.endpointHost,
+      STAGING_TARGET.directEndpointHost,
+    ]),
+  }),
+]);
+
+export function getStagingTargetForHost(host) {
+  return ALLOWED_STAGING_TARGETS.find(({ acceptedHosts }) =>
+    acceptedHosts.includes(host)
+  )?.target;
+}
 
 export function buildStagingPoolConfig(environment = process.env) {
   if (environment.NEON_MIGRATION_TARGET !== "staging") {
@@ -43,21 +62,22 @@ export function buildStagingPoolConfig(environment = process.env) {
   if (url.protocol !== "postgres:" && url.protocol !== "postgresql:") {
     throw new MigrationRunnerError("connection URL validation");
   }
+  if (url.hash || url.href.endsWith("#")) {
+    throw new MigrationRunnerError("connection URL fragment validation");
+  }
 
   const host = url.hostname.toLowerCase();
-  if (/-pooler(?:[.-]|$)/i.test(host)) {
-    throw new MigrationRunnerError("direct connection validation");
-  }
-  if (host !== STAGING_TARGET.endpointHost || parsed.host?.toLowerCase() !== host) {
+  const target = getStagingTargetForHost(host);
+  if (!target || parsed.host?.toLowerCase() !== host) {
     throw new MigrationRunnerError("staging endpoint validation");
   }
 
   if (
     (url.port && url.port !== "5432") ||
     (parsed.port && String(parsed.port) !== "5432") ||
-    url.pathname !== `/${STAGING_TARGET.databaseName}` ||
-    parsed.database !== STAGING_TARGET.databaseName ||
-    !parsed.user ||
+    url.pathname !== `/${target.databaseName}` ||
+    parsed.database !== target.databaseName ||
+    parsed.user !== target.role ||
     !parsed.password
   ) {
     throw new MigrationRunnerError("staging database validation");
@@ -80,9 +100,9 @@ export function buildStagingPoolConfig(environment = process.env) {
   }
 
   return {
-    host: STAGING_TARGET.endpointHost,
+    host: target.directEndpointHost,
     port: 5432,
-    database: STAGING_TARGET.databaseName,
+    database: target.databaseName,
     user: parsed.user,
     password: parsed.password,
     ssl: { rejectUnauthorized: true },
@@ -108,7 +128,10 @@ export async function runStagingMigrations() {
     const config = buildStagingPoolConfig();
     pool = new pg.Pool(config);
     client = await pool.connect();
-    const engineResult = await runMigrationEngine({ client });
+    const engineResult = await runMigrationEngine({
+      client,
+      expectedRole: STAGING_TARGET.role,
+    });
     releaseConnection = engineResult.releaseConnection;
     result = {
       bootstrapApplied: engineResult.bootstrapApplied,
@@ -142,7 +165,7 @@ export async function runStagingMigrations() {
     throw failure;
   }
 
-  console.log("[PASS] Staging bootstrap and migrations 001–011 are complete.");
+  console.log("[PASS] Staging bootstrap and migrations 001–012 are complete.");
   return result;
 }
 

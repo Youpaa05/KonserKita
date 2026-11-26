@@ -8,12 +8,12 @@ Dokumen ini menjelaskan bootstrap schema, migration yang tersedia di repository,
 - Bootstrap, seed, dan migration dapat mengubah schema atau data.
 - Jangan menjalankan reset, truncate, drop, seed, atau migration tanpa meninjau SQL, memastikan target, dan menyiapkan pemulihan.
 
-## Bootstrap schema dan migration 001–011
+## Bootstrap schema dan migration 001–012
 
 Database disiapkan dalam dua tahap:
 
-1. `backend/database/schema.sql` adalah bootstrap untuk tabel dasar `concerts`, `ticket_categories`, dan `bookings`. Migration 001–011 mengasumsikan tabel dasar ini sudah tersedia; rangkaian migration bukan bootstrap penuh untuk database kosong.
-2. `backend/database/migrations/001`–`011` memperluas schema secara berurutan:
+1. `backend/database/schema.sql` adalah bootstrap untuk tabel dasar `concerts`, `ticket_categories`, dan `bookings`. Migration 001–012 mengasumsikan tabel dasar ini sudah tersedia; rangkaian migration bukan bootstrap penuh untuk database kosong.
+2. `backend/database/migrations/001`–`012` memperluas schema secara berurutan:
 
    - `001`: membuat `roles` dan `users`, menambahkan `bookings.user_id` nullable dan foreign key kepemilikan booking, serta memasukkan role customer/admin.
    - `002`: membuat `user_sessions` untuk hash token sesi, masa berlaku, pencabutan sesi, dan index terkait.
@@ -26,8 +26,9 @@ Database disiapkan dalam dua tahap:
    - `009`: mengunci booking eligible, merekonsiliasi tiket yang kurang, dan menggagalkan transaksi jika ditemukan data lintas status yang tidak konsisten, tiket di luar rentang, konflik kode, atau hasil akhir yang tidak lengkap.
    - `010`: menambahkan waktu/alasan pembatalan konser, constraint konsistensi, dan index; relasi booking, payment, serta tiket tidak dihapus.
    - `011`: membuat histori transisi payment mendatang dan audit perubahan role admin; histori lama tidak direka ulang.
+   - `012`: mengubah `user_sessions.user_id` menjadi `BIGINT`, menyamakan kapasitasnya dengan `users.id`, dan mempertahankan foreign key `ON DELETE CASCADE`.
 
-Migration 002 memakai `INTEGER` untuk `user_sessions.user_id`, sedangkan `users.id` pada migration 001 bertipe `BIGINT`. Ini merupakan batas kapasitas yang tidak konsisten; migration lama tidak diubah. Jika perbaikan diperlukan, tinjau dampak target dan gunakan migration baru.
+Migration 002 memakai `INTEGER` untuk `user_sessions.user_id`, sedangkan `users.id` pada migration 001 bertipe `BIGINT`. Migration 002 dipertahankan tanpa perubahan agar checksum database yang sudah mencatat migration lama tetap valid. Migration 012 memperbaiki tipe tersebut secara aditif: melepas FK yang ada, melebarkan kolom tanpa kehilangan nilai, lalu memasang kembali FK dengan perilaku `ON DELETE CASCADE`. Engine menjalankan setiap migration dalam transaksi; perubahan ini belum diuji pada PostgreSQL nyata.
 
 ### Migration 008: rate limit dan backfill tiket
 
@@ -64,11 +65,15 @@ Perintah tersebut **mengubah database** dan bukan pemeriksaan status read-only. 
 
 `backend/scripts/migrate.js` membatasi target pada database `konserkita_db`, user `postgres`, port `5432`, alamat loopback IPv4/IPv6, dan koneksi read-write. Runner memakai advisory lock dan tabel `schema_migrations`, lalu memeriksa nama file serta checksum migration. Guard ini ditujukan untuk database lokal dan menolak server remote; jangan mengubah atau melewatinya untuk mengarah ke Neon.
 
-Untuk Neon staging saja, tersedia runner terpisah `backend/scripts/migrate-neon.js` melalui `npm --prefix backend run db:migrate:neon`. Runner ini dikunci ke project, branch, database, dan direct endpoint staging yang telah diverifikasi; ia tidak membaca `backend/.env`, menolak target selain staging, dan mewajibkan TLS terverifikasi. Ia bootstrap `schema.sql` hanya pada database kosong dan melacak baseline serta migration 001–011 dengan checksum. Lihat [panduan Neon staging migrations](./neon-staging-migrations.md). Runner tersebut bukan runner production.
+Untuk Neon staging, tersedia runner terpisah `backend/scripts/migrate-neon.js` melalui `npm --prefix backend run db:migrate:neon`. Target KonserKitah dipatok ke project `silent-hat-21218854`, branch staging `br-quiet-river-bda1sb4d`, database `neondb`, dan pasangan hostname pooled/direct yang di-allowlist secara exact. Hostname pooler hanya mengidentifikasi target; koneksi migrasi memakai direct endpoint dengan TLS terverifikasi. Host sembarang, suffix palsu, dan hostname staging Neon lama ditolak oleh runner baru; resource Neon lama tidak diubah atau dihapus. Sebelum migrasi pertama, verifikasi melalui Neon Console bahwa project ID, branch ID, database, serta pasangan endpoint tersebut benar-benar cocok. Runner tidak memanggil Neon untuk memverifikasi branch ID saat runtime. Runner tidak membaca `backend/.env`, mewajibkan role `neondb_owner`, memeriksa `USAGE` dan `CREATE` pada schema `public`, dan melacak baseline serta migration 001–012 dengan checksum.
+
+Pemeriksaan bootstrap menggunakan inventaris terdefinisi atas schema `public` dan beberapa kategori objek aplikasi/database, termasuk relasi, routine, type, operator, object database-level, large object, dan privilege default. Ini bukan jaminan bahwa seluruh kategori katalog PostgreSQL/cluster kosong; keadaan tak dikenal harus diperiksa melalui prosedur read-only yang disetujui. Dua default ACL Neon diabaikan hanya jika owner, schema, jenis objek, dan ACL persis cocok dengan definisi di engine. Role/privilege aktual pada branch belum diverifikasi. Pastikan credential yang dipakai adalah role migrasi yang disetujui sebelum penggunaan.
+
+Runner production terpisah tersedia melalui `backend/scripts/migrate-neon-production.js`, dengan allowlist serta konfirmasi eksplisit `NEON_PRODUCTION_MIGRATION_TARGET=production` yang terpisah dari konfirmasi staging. Allowlist-nya masih menunjuk ke infrastruktur Neon lama. Endpoint production KonserKitah belum diberikan atau dikonfigurasi; jangan gunakan runner production lama terhadap branch baru. Lihat [panduan Neon staging migrations](./neon-staging-migrations.md) untuk prosedur dan pemisahan target. Tidak satu pun runner tersebut dijalankan atau diverifikasi terhadap PostgreSQL nyata dalam audit ini.
 
 ### Data demo Neon Production
 
-`backend/scripts/seed-neon-production.ps1` berisi mekanisme untuk menambahkan delapan konser fixture dan 24 kategori melalui transaksi pada target Production yang di-allowlist. Jangan menjalankan seed dalam pemulihan ini. Runner memeriksa database, role, versi PostgreSQL, checksum baseline/migration 001–011, dan konflik sebelum menulis. Keberadaan fixture bukan bukti bahwa data tersebut layak untuk katalog produk.
+`backend/scripts/seed-neon-production.ps1` berisi mekanisme untuk menambahkan delapan konser fixture dan 24 kategori melalui transaksi pada target Production lama yang di-allowlist. Jangan menjalankan seed dalam pemulihan ini atau menganggap target tersebut sebagai branch production KonserKitah. Guard yang didokumentasikan untuk database, role, versi PostgreSQL, checksum baseline/migration 001–012, dan konflik bukan bukti bahwa role/privilege atau data target sudah diverifikasi; seed maupun pemeriksaan terhadap target tidak dijalankan di sini. Keberadaan fixture bukan bukti bahwa data tersebut layak untuk katalog produk.
 
 ## Status migration
 
@@ -76,6 +81,7 @@ Untuk Neon staging saja, tersedia runner terpisah `backend/scripts/migrate-neon.
 - Migration 008 tersedia di source tetapi **belum dijalankan**.
 - Migration 009 tersedia di source tetapi **belum dijalankan atau diuji terhadap PostgreSQL nyata**.
 - Migration 010–011 tersedia di source tetapi **belum dijalankan atau diuji pada database target**.
+- Migration 012 ditambahkan untuk menyamakan tipe `user_sessions.user_id` dengan `users.id`; migration ini **belum dijalankan atau diuji pada PostgreSQL nyata**.
 - Migration production **belum dijalankan atau diverifikasi**.
 - Keberadaan file SQL atau tabel tracking tidak membuktikan bahwa migration telah diterapkan pada database yang dimaksud.
 
@@ -83,17 +89,17 @@ Dokumen ini tidak melakukan koneksi atau pemeriksaan terhadap database.
 
 ## Persiapan migration production (tanpa menjalankannya)
 
-Repository ini tidak menyediakan runner migration production untuk Neon. Jangan menggunakan `backend/scripts/migrate.js` atau runner staging pada target production.
+Repository menyediakan runner migration production Neon yang terpisah, tetapi runner tersebut masih dibatasi pada target infrastruktur lama dan memakai konfirmasi production tersendiri. Endpoint production KonserKitah belum dikonfigurasi. Jangan menggunakan runner lokal atau runner staging pada target production, dan jangan menggunakan runner production lama pada branch production KonserKitah.
 
 Sebelum migration production dipertimbangkan:
 
 1. Pastikan identitas database dan schema target melalui pemeriksaan read-only yang disetujui. Jika tabel `schema_migrations` tersedia, cocokkan riwayat versi, nama file, dan checksum dengan source; jangan menganggap tabel tersebut selalu ada.
-2. Tinjau bootstrap dan urutan 001–011 terhadap schema serta data target. Perhatikan backfill payment pada 005, batasan backfill awal pada 008, precondition/validasi 009, serta perubahan pembatalan dan histori pada 010–011.
+2. Tinjau bootstrap dan urutan 001–012 terhadap schema serta data target. Perhatikan backfill payment pada 005, batasan backfill awal pada 008, precondition/validasi 009, perubahan pembatalan dan histori pada 010–011, serta pelebaran tipe user session pada 012.
 3. Siapkan salinan staging PostgreSQL yang terisolasi dan dapat dipulihkan. Pastikan penulisan aplikasi tidak berjalan selama uji migration, jalankan prosedur migration yang disetujui untuk lingkungan tersebut, lalu verifikasi jumlah dan rentang tiket per booking eligible.
 4. Uji kasus booking tanpa tiket, tiket lengkap, nomor hilang, nomor ekstra, konflik kode, payment/status tidak eligible, status tiket `used`, serta rollback saat validasi gagal. Jangan menganggap mock/static test membuktikan perilaku SQL atau concurrency PostgreSQL.
 5. Pastikan PostgreSQL target mendukung fungsi yang digunakan migration 008, termasuk `gen_random_uuid()` dan `generate_series()`.
 6. Siapkan backup yang dapat dipulihkan, rencana pemulihan, pemantauan, persetujuan perubahan, dan jadwal yang sesuai.
-7. Tentukan prosedur production yang disetujui di luar runner lokal dan runner staging ini. Repository tidak menyediakan perintah production untuk Neon.
+7. Tentukan prosedur production yang disetujui sebelum penggunaan. Repository menyediakan runner production Neon dengan allowlist yang masih terikat ke infrastruktur lama; endpoint KonserKitah production belum diverifikasi atau dikonfigurasi. Jangan arahkan atau jalankan runner tersebut pada target baru sebelum identitas endpoint diberikan, diverifikasi, dan ditinjau.
 
 Langkah di atas adalah checklist persiapan, bukan instruksi untuk menjalankan migration dan bukan bukti bahwa migration aman atau sudah diterapkan.
 

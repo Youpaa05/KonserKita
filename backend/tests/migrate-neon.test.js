@@ -9,6 +9,7 @@ import { runMigrationEngine } from "../scripts/internal/neon-migration-engine.js
 import {
   buildStagingPoolConfig,
   EXPECTED_MIGRATION_FILES,
+  getStagingTargetForHost,
   runStagingMigrations as stagingRunner,
   STAGING_TARGET,
 } from "../scripts/migrate-neon.js";
@@ -24,7 +25,7 @@ function environment(overrides = {}) {
   return {
     NEON_MIGRATION_TARGET: "staging",
     NEON_MIGRATION_DATABASE_URL:
-      `postgresql://migration:${fakePassword}@${STAGING_TARGET.endpointHost}/neondb?sslmode=require&channel_binding=require`,
+      `postgresql://${STAGING_TARGET.role}:${fakePassword}@${STAGING_TARGET.endpointHost}/neondb?sslmode=require&channel_binding=require`,
     ...overrides,
   };
 }
@@ -34,7 +35,11 @@ async function runStagingMigrations(options) {
   const client = await pool.connect();
   let destroyConnection = false;
   try {
-    const result = await runMigrationEngine({ client, ...engineOptions });
+    const result = await runMigrationEngine({
+      client,
+      expectedRole: STAGING_TARGET.role,
+      ...engineOptions,
+    });
     destroyConnection = result.releaseConnection;
     return result;
   } catch (error) {
@@ -66,7 +71,12 @@ async function createMigrationFixture() {
   return { directory, schemaPath, migrationsPath };
 }
 
-function createFakePool({ nonEmpty = false, contentOverrides = {}, failVersion } = {}) {
+function createFakePool({
+  nonEmpty = false,
+  contentOverrides = {},
+  identityOverrides = {},
+  failVersion,
+} = {}) {
   const database = {
     trackingExists: false,
     baselineExists: false,
@@ -89,7 +99,9 @@ function createFakePool({ nonEmpty = false, contentOverrides = {}, failVersion }
             role_name: "neondb_owner",
             transaction_read_only: "off",
             server_version_num: "180000",
+            can_use_public: true,
             can_create_public: true,
+            ...identityOverrides,
           }],
         };
       }
@@ -117,10 +129,23 @@ function createFakePool({ nonEmpty = false, contentOverrides = {}, failVersion }
             conversion_count: 0,
             operator_class_count: 0,
             operator_family_count: 0,
+            operator_count: 0,
+            statistics_count: 0,
             text_search_config_count: 0,
             text_search_dictionary_count: 0,
             text_search_parser_count: 0,
             text_search_template_count: 0,
+            custom_language_count: 0,
+            event_trigger_count: 0,
+            publication_count: 0,
+            subscription_count: 0,
+            replication_origin_count: 0,
+            foreign_data_wrapper_count: 0,
+            foreign_server_count: 0,
+            user_mapping_count: 0,
+            transform_count: 0,
+            database_setting_count: 0,
+            large_object_count: 0,
             unexpected_default_privilege_count: 0,
             ...contentOverrides,
           }],
@@ -228,6 +253,98 @@ test("target values other than staging are rejected", () => {
   );
 });
 
+test("the new staging branch target recognizes only its exact pooler and direct hosts", () => {
+  assert.deepEqual(STAGING_TARGET, {
+    projectId: "silent-hat-21218854",
+    branchName: "staging",
+    branchId: "br-quiet-river-bda1sb4d",
+    databaseName: "neondb",
+    role: "neondb_owner",
+    endpointHost: "ep-dark-dawn-bdayxwt3-pooler.c-8.us-east-2.aws.neon.tech",
+    directEndpointHost: "ep-dark-dawn-bdayxwt3.c-8.us-east-2.aws.neon.tech",
+  });
+
+  assert.equal(getStagingTargetForHost(STAGING_TARGET.endpointHost), STAGING_TARGET);
+  assert.equal(
+    getStagingTargetForHost(STAGING_TARGET.directEndpointHost),
+    STAGING_TARGET,
+  );
+  assert.equal(
+    getStagingTargetForHost(`${STAGING_TARGET.endpointHost}.attacker.example`),
+    undefined,
+  );
+
+  const config = buildStagingPoolConfig(environment());
+  assert.equal(config.host, STAGING_TARGET.directEndpointHost);
+  assert.equal(config.database, "neondb");
+  assert.equal(config.user, STAGING_TARGET.role);
+  assert.equal(config.port, 5432);
+
+  const directConfig = buildStagingPoolConfig(environment({
+    NEON_MIGRATION_DATABASE_URL:
+      `postgresql://${STAGING_TARGET.role}:${fakePassword}@${STAGING_TARGET.directEndpointHost}/neondb`,
+  }));
+  assert.equal(directConfig.host, STAGING_TARGET.directEndpointHost);
+});
+
+test("the staging connection URL must use the configured migration role", () => {
+  const config = buildStagingPoolConfig(environment());
+  assert.equal(config.user, "neondb_owner");
+
+  assert.throws(
+    () => buildStagingPoolConfig(environment({
+      NEON_MIGRATION_DATABASE_URL:
+        `postgresql://another_role:${fakePassword}@${STAGING_TARGET.endpointHost}/neondb`,
+    })),
+    /staging database validation/,
+  );
+});
+
+test("staging URLs with an empty fragment are rejected", () => {
+  const connectionString = environment().NEON_MIGRATION_DATABASE_URL;
+  const url = new URL(`${connectionString}#`);
+  assert.equal(url.hash, "");
+  assert.equal(url.href.endsWith("#"), true);
+
+  assert.throws(
+    () => buildStagingPoolConfig(environment({
+      NEON_MIGRATION_DATABASE_URL: url.href,
+    })),
+    /connection URL fragment validation/,
+  );
+});
+
+test("staging URLs with a text fragment are rejected", () => {
+  const connectionString = environment().NEON_MIGRATION_DATABASE_URL;
+  const url = new URL(`${connectionString}#fragment`);
+  assert.equal(url.hash, "#fragment");
+
+  assert.throws(
+    () => buildStagingPoolConfig(environment({
+      NEON_MIGRATION_DATABASE_URL: url.href,
+    })),
+    /connection URL fragment validation/,
+  );
+});
+
+test("legacy staging endpoints are rejected by the new staging runner", () => {
+  const legacyHosts = [
+    "ep-silent-pond-bdceumwc.c-8.us-east-2.aws.neon.tech",
+    "ep-mute-fire-bdv1e9ll.c-8.us-east-2.aws.neon.tech",
+  ];
+
+  for (const host of legacyHosts) {
+    assert.equal(getStagingTargetForHost(host), undefined);
+    assert.throws(
+      () => buildStagingPoolConfig(environment({
+        NEON_MIGRATION_DATABASE_URL:
+          `postgresql://${STAGING_TARGET.role}:${fakePassword}@${host}/neondb?sslmode=require`,
+      })),
+      /staging endpoint validation/,
+    );
+  }
+});
+
 test("the process environment rejects missing and empty values and accepts valid staging values", () => {
   const previousTarget = process.env.NEON_MIGRATION_TARGET;
   const previousUrl = process.env.NEON_MIGRATION_DATABASE_URL;
@@ -243,9 +360,9 @@ test("the process environment rejects missing and empty values and accepts valid
     assert.throws(() => buildStagingPoolConfig(), /connection configuration/);
 
     process.env.NEON_MIGRATION_DATABASE_URL =
-      `postgresql://migration:${fakePassword}@${STAGING_TARGET.endpointHost}/neondb?sslmode=require&channel_binding=require`;
+      `postgresql://${STAGING_TARGET.role}:${fakePassword}@${STAGING_TARGET.endpointHost}/neondb?sslmode=require&channel_binding=require`;
     const config = buildStagingPoolConfig();
-    assert.equal(config.host, STAGING_TARGET.endpointHost);
+    assert.equal(config.host, STAGING_TARGET.directEndpointHost);
     assert.equal(config.database, "neondb");
     assert.deepEqual(config.ssl, { rejectUnauthorized: true });
 
@@ -259,15 +376,24 @@ test("the process environment rejects missing and empty values and accepts valid
   }
 });
 
-test("pooled, empty, invalid, wrong-host, and wrong-database URLs are rejected", () => {
-  const pooledHost = STAGING_TARGET.endpointHost.replace(".c-8.", "-pooler.c-8.");
-  assert.throws(
-    () => buildStagingPoolConfig(environment({
-      NEON_MIGRATION_DATABASE_URL:
-        `postgresql://migration:${fakePassword}@${pooledHost}/neondb`,
-    })),
-    /direct connection validation/,
-  );
+test("arbitrary Neon hosts and fake suffixes are rejected", () => {
+  const unapprovedHosts = [
+    "ep-random-123456.c-8.us-east-2.aws.neon.tech",
+    `${STAGING_TARGET.endpointHost}.attacker.example`,
+  ];
+
+  for (const host of unapprovedHosts) {
+    assert.throws(
+      () => buildStagingPoolConfig(environment({
+        NEON_MIGRATION_DATABASE_URL:
+          `postgresql://${STAGING_TARGET.role}:${fakePassword}@${host}/neondb`,
+      })),
+      /staging endpoint validation/,
+    );
+  }
+});
+
+test("empty, invalid, wrong-host, and wrong-database URLs are rejected", () => {
   assert.throws(
     () => buildStagingPoolConfig(environment({ NEON_MIGRATION_DATABASE_URL: "" })),
     /connection configuration/,
@@ -279,14 +405,21 @@ test("pooled, empty, invalid, wrong-host, and wrong-database URLs are rejected",
   assert.throws(
     () => buildStagingPoolConfig(environment({
       NEON_MIGRATION_DATABASE_URL:
-        `postgresql://migration:${fakePassword}@another-host.example/neondb`,
+        `postgresql://${STAGING_TARGET.role}:${fakePassword}@another-host.example/neondb`,
     })),
     /staging endpoint validation/,
   );
   assert.throws(
     () => buildStagingPoolConfig(environment({
       NEON_MIGRATION_DATABASE_URL:
-        `postgresql://migration:${fakePassword}@${STAGING_TARGET.endpointHost}/otherdb`,
+        `postgresql://${STAGING_TARGET.role}:${fakePassword}@${STAGING_TARGET.endpointHost}/otherdb`,
+    })),
+    /staging database validation/,
+  );
+  assert.throws(
+    () => buildStagingPoolConfig(environment({
+      NEON_MIGRATION_DATABASE_URL:
+        `postgresql://${STAGING_TARGET.role}:${fakePassword}@${STAGING_TARGET.endpointHost}:5433/neondb`,
     })),
     /staging database validation/,
   );
@@ -297,37 +430,55 @@ test("a non-staging endpoint is rejected even when the target says staging", () 
   assert.throws(
     () => buildStagingPoolConfig(environment({
       NEON_MIGRATION_DATABASE_URL:
-        `postgresql://migration:${fakePassword}@${productionEndpointHost}/neondb`,
+        `postgresql://${STAGING_TARGET.role}:${fakePassword}@${productionEndpointHost}/neondb`,
     })),
     /staging endpoint validation/,
+  );
+});
+
+test("staging connection failures do not expose credentials or the supplied URL", () => {
+  const connectionString =
+    `postgresql://${STAGING_TARGET.role}:${fakePassword}@${STAGING_TARGET.endpointHost}.attacker.example/neondb?sslmode=require`;
+
+  assert.throws(
+    () => buildStagingPoolConfig(environment({
+      NEON_MIGRATION_DATABASE_URL: connectionString,
+    })),
+    (error) => {
+      assert.equal(error.message.includes(fakePassword), false);
+      assert.equal(error.message.includes(connectionString), false);
+      return true;
+    },
   );
 });
 
 test("migration connection configuration forces certificate verification", () => {
   const config = buildStagingPoolConfig(environment({
     NEON_MIGRATION_DATABASE_URL:
-      `postgresql://migration:${fakePassword}@${STAGING_TARGET.endpointHost}/neondb?sslmode=require`,
+      `postgresql://${STAGING_TARGET.role}:${fakePassword}@${STAGING_TARGET.endpointHost}/neondb?sslmode=require`,
   }));
   assert.deepEqual(config.ssl, { rejectUnauthorized: true });
-  assert.equal(config.host, STAGING_TARGET.endpointHost);
+  assert.equal(config.host, STAGING_TARGET.directEndpointHost);
   assert.equal(config.database, "neondb");
   assert.equal(config.max, 1);
   assert.throws(
     () => buildStagingPoolConfig(environment({
       NEON_MIGRATION_DATABASE_URL:
-        `postgresql://migration:${fakePassword}@${STAGING_TARGET.endpointHost}/neondb?sslmode=disable`,
+        `postgresql://${STAGING_TARGET.role}:${fakePassword}@${STAGING_TARGET.endpointHost}/neondb?sslmode=disable`,
     })),
     /TLS mode validation/,
   );
 });
 
-test("the npm migration script receives environment variables before URL validation", () => {
+test("the npm migration script rejects an unapproved host without logging credentials", () => {
   const command = process.platform === "win32"
     ? process.env.ComSpec || "cmd.exe"
     : "npm";
   const args = process.platform === "win32"
     ? ["/d", "/s", "/c", "npm.cmd run db:migrate:neon"]
     : ["run", "db:migrate:neon"];
+  const invalidUrl =
+    `postgresql://${STAGING_TARGET.role}:${fakePassword}@${STAGING_TARGET.endpointHost}.attacker.example/neondb?sslmode=require`;
   const result = spawnSync(
     command,
     args,
@@ -337,7 +488,7 @@ test("the npm migration script receives environment variables before URL validat
       env: {
         ...process.env,
         NEON_MIGRATION_TARGET: "staging",
-        NEON_MIGRATION_DATABASE_URL: "not-a-url",
+        NEON_MIGRATION_DATABASE_URL: invalidUrl,
       },
     },
   );
@@ -345,8 +496,9 @@ test("the npm migration script receives environment variables before URL validat
   const output = `${result.stdout || ""}\n${result.stderr || ""}`;
   assert.equal(result.error, undefined, result.error?.message);
   assert.equal(result.status, 1, output);
-  assert.match(output, /connection URL validation/);
-  assert.doesNotMatch(output, /connection configuration/);
+  assert.match(output, /staging endpoint validation/);
+  assert.doesNotMatch(output, new RegExp(fakePassword));
+  assert.equal(output.includes(invalidUrl), false);
   assert.doesNotMatch(output, /\[RUN\]|\[PASS\] Migration/);
 });
 
@@ -382,7 +534,10 @@ test("the staging entry point has no caller-supplied pool or connection seam", a
   assert.equal(stagingRunner.length, 0);
   assert.match(runnerSource, /buildStagingPoolConfig\(\)/);
   assert.match(runnerSource, /new pg\.Pool\(config\)/);
-  assert.match(runnerSource, /runMigrationEngine\(\{\s*client\s*\}\)/);
+  assert.match(
+    runnerSource,
+    /runMigrationEngine\(\{\s*client,\s*expectedRole:\s*STAGING_TARGET\.role/s,
+  );
   assert.doesNotMatch(runnerSource, /suppliedPool|pool\s*:\s*[^:]/);
 });
 
@@ -398,7 +553,7 @@ test("a non-empty database without migration tracking is not bootstrapped", asyn
         schemaPath: fixture.schemaPath,
         logger: { log() {}, error() {} },
       }),
-      /empty database verification/,
+      /bootstrap schema verification/,
     );
     assert.equal(fake.database.trackingExists, false);
     assert.equal(fake.calls.some(({ query }) => query.includes("CREATE TABLE public.schema_migrations")), false);
@@ -408,22 +563,31 @@ test("a non-empty database without migration tracking is not bootstrapped", asyn
   }
 });
 
-test("the migration engine verifies an explicitly required connected role", async () => {
+test("the migration engine accepts the expected connected role and rejects another role", async () => {
   const fixture = await createMigrationFixture();
-  const fake = createFakePool();
-  const originalQuery = fake.client.query.bind(fake.client);
-  fake.client.query = async (sql, values) => {
-    const result = await originalQuery(sql, values);
-    if (String(sql).includes("current_database() AS database_name")) {
-      result.rows[0].role_name = "unexpected_role";
-    }
-    return result;
-  };
+  const valid = createFakePool();
+  const invalid = createFakePool({
+    identityOverrides: { role_name: "unexpected_role" },
+  });
 
   try {
+    const result = await runStagingMigrations({
+      pool: valid.pool,
+      expectedRole: "neondb_owner",
+      migrationsPath: fixture.migrationsPath,
+      schemaPath: fixture.schemaPath,
+      logger: { log() {}, error() {} },
+    });
+    assert.equal(result.complete, true);
+    const identityQuery = valid.calls.find(({ query }) =>
+      query.includes("current_database() AS database_name")
+    )?.query;
+    assert.match(identityQuery, /has_schema_privilege\(current_user, 'public', 'USAGE'\)/);
+    assert.match(identityQuery, /has_schema_privilege\(current_user, 'public', 'CREATE'\)/);
+
     await assert.rejects(
       runStagingMigrations({
-        pool: fake.pool,
+        pool: invalid.pool,
         expectedRole: "neondb_owner",
         migrationsPath: fixture.migrationsPath,
         schemaPath: fixture.schemaPath,
@@ -431,8 +595,73 @@ test("the migration engine verifies an explicitly required connected role", asyn
       }),
       /database identity and privilege verification/,
     );
-    assert.equal(fake.database.trackingExists, false);
-    assert.deepEqual(fake.executedVersions, []);
+    assert.equal(invalid.database.trackingExists, false);
+    assert.deepEqual(invalid.executedVersions, []);
+  } finally {
+    await fs.rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test("the migration engine requires an explicitly expected database name", async () => {
+  const fixture = await createMigrationFixture();
+  const databaseName = "konserkita_phase20_test_0123456789abcdef";
+  const identityOverrides = {
+    database_name: databaseName,
+    role_name: "postgres",
+  };
+  const rejected = createFakePool({ identityOverrides });
+  const accepted = createFakePool({ identityOverrides });
+
+  try {
+    await assert.rejects(
+      runMigrationEngine({
+        client: rejected.client,
+        expectedRole: "postgres",
+        migrationsPath: fixture.migrationsPath,
+        schemaPath: fixture.schemaPath,
+        logger: { log() {}, error() {} },
+      }),
+      /database identity and privilege verification/,
+    );
+
+    const result = await runMigrationEngine({
+      client: accepted.client,
+      expectedRole: "postgres",
+      expectedDatabaseName: databaseName,
+      migrationsPath: fixture.migrationsPath,
+      schemaPath: fixture.schemaPath,
+      logger: { log() {}, error() {} },
+    });
+
+    assert.equal(result.complete, true);
+    assert.equal(result.bootstrapApplied, true);
+    assert.equal(accepted.database.trackingExists, true);
+  } finally {
+    await fs.rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test("the migration engine rejects missing USAGE or CREATE privilege on public", async () => {
+  const fixture = await createMigrationFixture();
+  try {
+    for (const privileges of [
+      { can_use_public: false },
+      { can_create_public: false },
+    ]) {
+      const fake = createFakePool({ identityOverrides: privileges });
+      await assert.rejects(
+        runStagingMigrations({
+          pool: fake.pool,
+          expectedRole: "neondb_owner",
+          migrationsPath: fixture.migrationsPath,
+          schemaPath: fixture.schemaPath,
+          logger: { log() {}, error() {} },
+        }),
+        /database identity and privilege verification/,
+      );
+      assert.equal(fake.database.trackingExists, false);
+      assert.deepEqual(fake.executedVersions, []);
+    }
   } finally {
     await fs.rm(fixture.directory, { recursive: true, force: true });
   }
@@ -450,7 +679,29 @@ test("a database with user-defined catalog objects is not bootstrapped", async (
         schemaPath: fixture.schemaPath,
         logger: { log() {}, error() {} },
       }),
-      /empty database verification/,
+      /bootstrap schema verification/,
+    );
+    assert.equal(fake.database.trackingExists, false);
+    assert.deepEqual(fake.executedVersions, []);
+  } finally {
+    await fs.rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test("an unrecognized database-level object blocks bootstrap", async () => {
+  const fixture = await createMigrationFixture();
+  const fake = createFakePool({
+    contentOverrides: { event_trigger_count: 1 },
+  });
+  try {
+    await assert.rejects(
+      runStagingMigrations({
+        pool: fake.pool,
+        migrationsPath: fixture.migrationsPath,
+        schemaPath: fixture.schemaPath,
+        logger: { log() {}, error() {} },
+      }),
+      /bootstrap schema verification/,
     );
     assert.equal(fake.database.trackingExists, false);
     assert.deepEqual(fake.executedVersions, []);
@@ -477,7 +728,14 @@ test("only the exact Neon default ACLs are ignored by empty-database verificatio
       query.includes("unexpected_default_privilege_count")
     )?.query;
     assert.ok(contentQuery);
+    assert.match(contentQuery, /nspname !~ '\^pg_'/);
+    assert.match(contentQuery, /pg_operator/);
+    assert.match(contentQuery, /pg_statistic_ext/);
+    assert.match(contentQuery, /pg_event_trigger/);
+    assert.match(contentQuery, /pg_publication/);
+    assert.match(contentQuery, /pg_largeobject_metadata/);
     assert.match(contentQuery, /pg_get_userbyid\(d\.defaclrole\) = 'cloud_admin'/);
+    assert.match(contentQuery, /WHERE n\.oid IS NULL OR NOT \(/);
     assert.match(contentQuery, /n\.nspname = 'public'/);
     assert.match(contentQuery, /d\.defaclobjtype = 'S'/);
     assert.match(contentQuery, /d\.defaclobjtype = 'r'/);
@@ -492,7 +750,7 @@ test("only the exact Neon default ACLs are ignored by empty-database verificatio
         schemaPath: fixture.schemaPath,
         logger: { log() {}, error() {} },
       }),
-      /empty database verification/,
+      /bootstrap schema verification/,
     );
     assert.equal(unexpected.database.trackingExists, false);
     assert.deepEqual(unexpected.executedVersions, []);
@@ -634,4 +892,25 @@ test("repository migrations are compatible with per-file transactions", async ()
     assert.doesNotMatch(sql, /\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY\b/i);
     assert.doesNotMatch(sql, /\bVACUUM\b/i);
   }
+});
+
+test("migration 012 widens session user IDs without changing migration 002", async () => {
+  const migration002 = await fs.readFile(
+    path.join(actualMigrationsPath, "002_create_user_sessions.sql"),
+    "utf8",
+  );
+  const migration012 = await fs.readFile(
+    path.join(actualMigrationsPath, "012_user_sessions_user_id_bigint.sql"),
+    "utf8",
+  );
+
+  assert.equal(
+    EXPECTED_MIGRATION_FILES[EXPECTED_MIGRATION_FILES.length - 1],
+    "012_user_sessions_user_id_bigint.sql",
+  );
+  assert.match(migration002, /user_id INTEGER NOT NULL REFERENCES users\(id\)/);
+  assert.match(migration012, /DROP CONSTRAINT user_sessions_user_id_fkey/i);
+  assert.match(migration012, /ALTER COLUMN user_id TYPE BIGINT/i);
+  assert.match(migration012, /ADD CONSTRAINT user_sessions_user_id_fkey/i);
+  assert.match(migration012, /REFERENCES public\.users\(id\)\s+ON DELETE CASCADE/i);
 });

@@ -121,8 +121,8 @@ export function createApp({
   app.use("/api/admin", adminRouter);
   app.use("/api/customer", customerRouter);
 
-  app.use((err, _req, res, _next) => {
-    if (res.headersSent) return;
+  app.use((err, req, res, next) => {
+    if (res.headersSent) return next(err);
 
     if (err?.type === "entity.parse.failed") {
       return sendError(res, 400, "Format JSON tidak valid.");
@@ -143,7 +143,21 @@ export function createApp({
       return sendError(res, 400, "Format JSON tidak valid.");
     }
 
-    logger.error("API request failed:", { name: err?.name || "Error", code: err?.code || "unknown" });
+    const errorName =
+      typeof err?.name === "string" &&
+      /^[A-Za-z][A-Za-z0-9_]{0,39}$/.test(err.name)
+        ? err.name
+        : "Error";
+    const errorCode =
+      typeof err?.code === "string" && /^[A-Z0-9]{5}$/.test(err.code)
+        ? err.code
+        : "unknown";
+
+    logger.error("API request failed:", {
+      name: errorName,
+      code: errorCode,
+      method: req.method,
+    });
 
     return sendError(
       res,

@@ -1,33 +1,201 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { readFile, readdir } from "node:fs/promises";
+import { readdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import dotenv from "dotenv";
 import express from "express";
 import { createServer } from "node:http";
 import pg from "pg";
-import { createPaymentRouter } from "../src/routes/payments.js";
 import { generateSessionToken, hashSessionToken, SESSION_COOKIE_NAME } from "../src/utils/session.js";
+import {
+  EXPECTED_MIGRATION_FILES,
+  runMigrationEngine,
+} from "../scripts/internal/neon-migration-engine.js";
+import { parseTemporaryDatabaseUrl } from "../scripts/phase20-run-local-pg-tests.mjs";
 
-const { Pool } = pg;
+const { Client, Pool } = pg;
 const databaseUrl = process.env.KONSERKITA_PAYMENT_TEST_DATABASE_URL;
 const here = path.dirname(fileURLToPath(import.meta.url));
 
+for (const key of [
+  "DATABASE_URL",
+  "DB_HOST",
+  "DB_PORT",
+  "DB_NAME",
+  "DB_USER",
+  "DB_PASSWORD",
+  "DATABASE_SSL",
+  "DATABASE_SSL_CA",
+]) {
+  delete process.env[key];
+}
+process.env.NODE_ENV = "test";
+dotenv.config = () => ({ parsed: {} });
+
 test("PostgreSQL payment simulation enforces ownership, expiry, atomic tickets, rollback, and idempotency", { skip: !databaseUrl }, async () => {
-  const target = new URL(databaseUrl);
-  assert.ok(["127.0.0.1", "localhost", "::1"].includes(target.hostname.replace(/^\[|\]$/g, "").toLowerCase()));
-  assert.ok(["konserkita_batch4_payment_test", "konserkita_batch4_payment_verify_test"].includes(decodeURIComponent(target.pathname.slice(1))));
-  const pool = new Pool({ connectionString: databaseUrl, max: 8 });
+  const target = parseTemporaryDatabaseUrl(databaseUrl);
+  const migrationClient = new Client({
+    connectionString: databaseUrl,
+    connectionTimeoutMillis: 5000,
+    application_name: "KonserKita phase20 migration test",
+  });
+  const pool = new Pool({
+    connectionString: databaseUrl,
+    max: 8,
+    connectionTimeoutMillis: 5000,
+    application_name: "KonserKita phase20 payment test",
+  });
   let server;
+  let migrationClientConnected = false;
+  let defaultDatabasePool;
   try {
-    const existing = await pool.query("SELECT count(*)::int AS count FROM pg_tables WHERE schemaname='public'");
-    assert.equal(existing.rows[0].count, 0, "payment integration database must be empty");
-    await pool.query(await readFile(path.resolve(here, "../database/schema.sql"), "utf8"));
+    await migrationClient.connect();
+    migrationClientConnected = true;
+    const identity = await migrationClient.query(`
+      SELECT current_database() AS database_name,
+             current_user AS role_name,
+             host(inet_server_addr()) AS server_address,
+             inet_server_port() AS server_port,
+             current_setting('server_version_num') AS server_version_num,
+             current_setting('transaction_read_only') AS transaction_read_only
+    `);
+    const serverIdentity = identity.rows[0];
+    assert.ok(serverIdentity, "PostgreSQL identity query must return a row");
+    assert.equal(serverIdentity.database_name, target.databaseName);
+    assert.equal(serverIdentity.role_name, "postgres");
+    assert.equal(serverIdentity.server_address, "127.0.0.1");
+    assert.equal(Number(serverIdentity.server_port), 5432);
+    assert.equal(serverIdentity.transaction_read_only, "off");
+    assert.ok(
+      Math.floor(Number(serverIdentity.server_version_num) / 10000) === 18,
+      "integration server must be PostgreSQL 18",
+    );
+
+    const emptyState = await migrationClient.query(`
+      SELECT to_regclass('public.schema_migrations') IS NULL AS no_migration_ledger,
+             (SELECT COUNT(*)::int
+              FROM pg_class c
+              JOIN pg_namespace n ON n.oid = c.relnamespace
+              WHERE n.nspname = 'public'
+                AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f', 'i', 'I')
+             ) AS public_object_count
+    `);
+    assert.equal(emptyState.rows[0].no_migration_ledger, true, "temporary database must have no migration ledger");
+    assert.equal(emptyState.rows[0].public_object_count, 0, "temporary database must have no public objects");
+
     const migrationDir = path.resolve(here, "../database/migrations");
-    const migrations = (await readdir(migrationDir)).filter((name) => /^\d+_.*\.sql$/.test(name)).sort();
-    assert.equal(migrations.length, 11);
-    for (const migration of migrations) await pool.query(await readFile(path.join(migrationDir, migration), "utf8"));
+    const migrations = (await readdir(migrationDir))
+      .filter((name) => /^\d+_.*\.sql$/.test(name))
+      .sort();
+    assert.deepEqual(migrations, EXPECTED_MIGRATION_FILES);
+
+    const migrationResult = await runMigrationEngine({
+      client: migrationClient,
+      expectedRole: "postgres",
+      expectedDatabaseName: target.databaseName,
+    });
+    assert.equal(migrationResult.complete, true);
+    assert.equal(migrationResult.bootstrapApplied, true, "schema bootstrap must start from a verified empty database");
+    assert.deepEqual(
+      migrationResult.appliedVersions,
+      EXPECTED_MIGRATION_FILES.map((name) => name.slice(0, 3)),
+    );
+    assert.deepEqual(migrationResult.skippedVersions, []);
+
+    const ledger = await migrationClient.query(
+      "SELECT version, name, checksum FROM public.schema_migrations ORDER BY version",
+    );
+    const expectedLedgerNames = ["schema.sql", ...EXPECTED_MIGRATION_FILES];
+    assert.equal(ledger.rows.length, expectedLedgerNames.length);
+    assert.deepEqual(
+      ledger.rows.map((row) => row.name),
+      expectedLedgerNames,
+    );
+    ledger.rows.forEach((row) => assert.match(String(row.checksum).trim(), /^[a-f0-9]{64}$/));
+    assert.equal(ledger.rows.at(-1).version, "012");
+
+    const userIdTypes = await migrationClient.query(`
+      SELECT c.relname AS table_name,
+             a.attname AS column_name,
+             format_type(a.atttypid, a.atttypmod) AS data_type
+      FROM pg_attribute a
+      JOIN pg_class c ON c.oid = a.attrelid
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = 'public'
+        AND ((c.relname = 'users' AND a.attname = 'id')
+          OR (c.relname = 'user_sessions' AND a.attname = 'user_id'))
+        AND a.attnum > 0
+        AND NOT a.attisdropped
+      ORDER BY c.relname, a.attname
+    `);
+    const dataTypes = new Map(
+      userIdTypes.rows.map((row) => [`${row.table_name}.${row.column_name}`, row.data_type]),
+    );
+    assert.equal(dataTypes.get("users.id"), "bigint");
+    assert.equal(dataTypes.get("user_sessions.user_id"), "bigint");
+
+    const constraints = await migrationClient.query(`
+      SELECT conname, contype, convalidated
+      FROM pg_constraint
+      WHERE connamespace = 'public'::regnamespace
+        AND conname = ANY($1::text[])
+    `, [[
+      "users_role_fk",
+      "bookings_user_fk",
+      "user_sessions_user_id_fkey",
+      "payments_status_valid",
+      "digital_tickets_booking_number_unique",
+      "concerts_cancellation_state_consistent",
+      "payment_history_status_changed",
+    ]]);
+    assert.equal(constraints.rows.length, 7);
+    assert.ok(constraints.rows.every((row) => row.convalidated));
+
+    const sessionForeignKey = await migrationClient.query(`
+      SELECT pg_get_constraintdef(oid) AS definition, convalidated
+      FROM pg_constraint
+      WHERE connamespace = 'public'::regnamespace
+        AND conname = 'user_sessions_user_id_fkey'
+        AND contype = 'f'
+    `);
+    assert.equal(sessionForeignKey.rows.length, 1);
+    assert.equal(sessionForeignKey.rows[0].convalidated, true);
+    assert.match(sessionForeignKey.rows[0].definition, /FOREIGN KEY \(user_id\) REFERENCES users\(id\) ON DELETE CASCADE/);
+
+    const indexes = await migrationClient.query(`
+      SELECT indexname
+      FROM pg_indexes
+      WHERE schemaname = 'public'
+        AND indexname = ANY($1::text[])
+    `, [[
+      "users_email_lower_unique_idx",
+      "user_sessions_user_id_idx",
+      "payments_status_expiry_idx",
+      "digital_tickets_status_idx",
+      "api_rate_limit_buckets_reset_at_idx",
+      "payment_status_history_payment_changed_idx",
+      "admin_role_change_audit_changed_idx",
+      "concerts_cancelled_at_idx",
+    ]]);
+    assert.equal(indexes.rows.length, 8);
+
+    const trigger = await migrationClient.query(`
+      SELECT EXISTS (
+        SELECT 1
+        FROM pg_trigger
+        WHERE tgname = 'payments_status_history_after_update'
+          AND tgrelid = 'public.payments'::regclass
+          AND NOT tgisinternal
+      ) AS present,
+      to_regprocedure('public.record_payment_status_change()') IS NOT NULL AS function_present
+    `);
+    assert.equal(trigger.rows[0].present, true);
+    assert.equal(trigger.rows[0].function_present, true);
+
+    ({ pool: defaultDatabasePool } = await import("../src/config/database.js"));
+    const { createPaymentRouter } = await import("../src/routes/payments.js");
 
     const roles = await pool.query("SELECT id,name FROM roles WHERE name IN ('customer','admin')");
     const customerRole = roles.rows.find((row) => row.name === "customer").id;
@@ -100,7 +268,37 @@ test("PostgreSQL payment simulation enforces ownership, expiry, atomic tickets, 
     assert.deepEqual(cancelledState.rows[0], { booking_status: "pending", payment_status: "pending" });
     assert.ok(headers.Cookie.startsWith(`${SESSION_COOKIE_NAME}=`));
   } finally {
-    if (server?.listening) await new Promise((resolve) => server.close(resolve));
-    await pool.end();
+    const cleanupFailures = [];
+    if (server?.listening) {
+      try {
+        await new Promise((resolve, reject) => {
+          server.close((error) => error ? reject(error) : resolve());
+        });
+      } catch {
+        cleanupFailures.push("HTTP server");
+      }
+    }
+    try {
+      await pool.end();
+    } catch {
+      cleanupFailures.push("payment pool");
+    }
+    if (migrationClientConnected) {
+      try {
+        await migrationClient.end();
+      } catch {
+        cleanupFailures.push("migration client");
+      }
+    }
+    if (defaultDatabasePool) {
+      try {
+        await defaultDatabasePool.end();
+      } catch {
+        cleanupFailures.push("default application pool");
+      }
+    }
+    if (cleanupFailures.length > 0) {
+      throw new Error(`Payment integration cleanup failed: ${cleanupFailures.join(", ")}.`);
+    }
   }
 });

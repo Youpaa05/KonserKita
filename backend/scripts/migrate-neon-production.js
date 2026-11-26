@@ -145,7 +145,7 @@ export async function runProductionMigrations() {
     throw failure;
   }
 
-  console.log("[PASS] Production bootstrap and migrations 001–011 are complete.");
+  console.log("[PASS] Production bootstrap and migrations 001–012 are complete.");
   return result;
 }
 

@@ -78,9 +78,16 @@ test("staging, pooled, and other hosts are rejected by the production allowlist"
   assert.throws(
     () => buildProductionPoolConfig(productionEnvironment({
       NEON_PRODUCTION_MIGRATION_DATABASE_URL:
-        productionUrl({ host: STAGING_TARGET.endpointHost }),
+        productionUrl({ host: STAGING_TARGET.directEndpointHost }),
     })),
     /production endpoint validation/,
+  );
+  assert.throws(
+    () => buildProductionPoolConfig(productionEnvironment({
+      NEON_PRODUCTION_MIGRATION_DATABASE_URL:
+        productionUrl({ host: STAGING_TARGET.endpointHost }),
+    })),
+    /direct connection validation/,
   );
 
   const pooledHost = PRODUCTION_TARGET.endpointHost.replace(".c-8.", "-pooler.c-8.");
@@ -202,14 +209,15 @@ test("production runner is connection-owning and invokes the shared migration en
 });
 
 test("staging connection builder and entry point remain available", () => {
-  const url = `postgresql://migration:${fakePassword}@${STAGING_TARGET.endpointHost}/neondb?sslmode=require`;
+  const url = `postgresql://${STAGING_TARGET.role}:${fakePassword}@${STAGING_TARGET.endpointHost}/neondb?sslmode=require`;
   const config = buildStagingPoolConfig({
     NEON_MIGRATION_TARGET: "staging",
     NEON_MIGRATION_DATABASE_URL: url,
   });
 
-  assert.equal(config.host, STAGING_TARGET.endpointHost);
+  assert.equal(config.host, STAGING_TARGET.directEndpointHost);
   assert.equal(config.database, "neondb");
+  assert.equal(config.user, STAGING_TARGET.role);
   assert.deepEqual(config.ssl, { rejectUnauthorized: true });
   assert.equal(typeof runStagingMigrations, "function");
 });
